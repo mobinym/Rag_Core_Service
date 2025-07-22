@@ -1,0 +1,8 @@
+# rag_core_service/requirements.txt
+fastapi
+uvicorn
+pydantic
+requests
+langchain-community
+langchain-ollama
+faiss-cpu
