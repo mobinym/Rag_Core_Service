@@ -1,10 +1,10 @@
-# app/models/schemas.py
+# rag_core_service/app/models/schemas.py
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-# --- مدل‌های مربوط به ایجاد جلسه ---
 class Chunk(BaseModel):
-    page_content: str
+    # ✅ نام فیلد مطابق با خروجی سرویس document_processor اصلاح شد
+    chunk_content: str
     metadata: Dict[str, Any]
 
 class CreateSessionResponse(BaseModel):
@@ -12,17 +12,16 @@ class CreateSessionResponse(BaseModel):
     message: str
     total_chunks: int
 
-# --- ✅ مدل‌های جدید برای پرسش و پاسخ ---
 class AskRequest(BaseModel):
     query: str
-    # در آینده استراتژی‌های پیشرفته را اینجا اضافه خواهیم کرد
-    # retrieval_strategy: str = "basic" 
+    retrieval_strategy: str = "adaptive"
     top_k: int = 3
 
 class SourceDocument(BaseModel):
+    # این نام استاندارد لانگ‌چین است و بهتر است همین باقی بماند
     page_content: str
     metadata: Dict[str, Any]
-    score: float # امتیاز شباهت را هم اضافه می‌کنیم
+    score: float
 
 class AskResponse(BaseModel):
     answer: str

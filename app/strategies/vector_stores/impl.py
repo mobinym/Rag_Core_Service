@@ -9,7 +9,6 @@ from .base import BaseVectorStoreStrategy
 EMBEDDING_DIM = 1024
 
 class FAISSStrategy(BaseVectorStoreStrategy):
-    """پیاده‌سازی استراتژی برای FAISS با قابلیت ذخیره و بازیابی."""
     
     def __init__(self, embeddings=None):
         super().__init__(embeddings=FakeEmbeddings(size=EMBEDDING_DIM))
@@ -42,11 +41,8 @@ class FAISSStrategy(BaseVectorStoreStrategy):
             
         docs_with_scores = self.vectorstore.similarity_search_with_score_by_vector(query_vector, k=k)
         
-        # ✅ --- راه حل نهایی اینجاست ---
-        # در همین لحظه که امتیاز تولید می‌شود، آن را به float استاندارد پایتون تبدیل می‌کنیم.
         for doc, score in docs_with_scores:
             doc.metadata["score"] = float(score) 
         
         return [doc for doc, score in docs_with_scores]
 
-# می‌توانید کلاس‌های ChromaStrategy و MilvusStrategy را نیز در آینده به همین شکل اصلاح کنید.
