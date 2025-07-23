@@ -12,7 +12,7 @@ from .strategies.vector_stores.base import BaseVectorStoreStrategy
 from .strategies.vector_stores.impl import FAISSStrategy, EMBEDDING_DIM
 from langchain_core.documents import Document
 from langchain_ollama import OllamaLLM
-
+import os
 # --- تنظیمات اولیه ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -64,20 +64,24 @@ def create_session(
     except requests.RequestException as e:
         raise HTTPException(status_code=503, detail=f"Error communicating with Embedding Service: {e}")
 
-    # ۳. ساخت ایندکس با استراتژی انتخابی
-    logger.info(f"Step 3: Creating index with '{vector_store_strategy}' strategy...")
+
+    # ۳. ساخت و ذخیره ایندکس
+    logger.info(f"Step 3: Creating and persisting index with '{vector_store_strategy}' strategy...")
     if vector_store_strategy not in STRATEGY_FACTORY:
         raise HTTPException(status_code=400, detail="Vector store strategy not supported.")
     
     strategy_class = STRATEGY_FACTORY[vector_store_strategy]
-    # چون امبدینگ را از قبل داریم، دیگر نیازی به ارسال مدل امبدینگ نیست
-    index_instance = strategy_class()  # ارسال None
+    index_instance = strategy_class()
     
     chunk_metadatas = [chunk.metadata for chunk in chunks]
     index_instance.create_index(texts=chunk_texts, vectors=vectors, metadatas=chunk_metadatas)
 
-    # ۴. ذخیره ایندکس در حافظه
+    # ۴. ذخیره ایندکس روی دیسک
     session_id = str(uuid.uuid4())
+    save_path = os.path.join(settings.INDEX_DIR, session_id)
+    index_instance.save_local(save_path)
+    
+    # (اختیاری) اضافه کردن به کش حافظه برای دسترسی فوری در درخواست‌های بعدی
     INDEX_CACHE[session_id] = index_instance
     
     return CreateSessionResponse(
@@ -89,15 +93,23 @@ def create_session(
 # ✅ --- اندپوینت جدید برای پرسش و پاسخ ---
 @app.post("/sessions/{session_id}/ask", response_model=AskResponse)
 def ask_question(session_id: str, request: AskRequest):
-    """یک سوال از جلسه مشخص شده می‌پرسد و پاسخ تولید شده توسط LLM را برمی‌گرداند."""
-    logger.info(f"Received ask request for session_id: {session_id}")
+    """Asks a question to a specific session and returns an LLM-generated answer."""
+    logger.info(f"Received ask request for session '{session_id}'")
     
-    # ۱. پیدا کردن ایندکس مربوط به جلسه
-    if session_id not in INDEX_CACHE:
-        raise HTTPException(status_code=404, detail="Session ID not found.")
-    index_instance = INDEX_CACHE[session_id]
-
-    # ۲. تبدیل سوال به بردار (با استفاده از سرویس امبدینگ)
+    # 1. Find the index: first in memory cache, then on disk
+    index_instance = INDEX_CACHE.get(session_id)
+    if not index_instance:
+        logger.info(f"Index not in cache. Loading from disk for session: {session_id}")
+        try:
+            index_path = os.path.join(settings.INDEX_DIR, session_id)
+            strategy_class = STRATEGY_FACTORY["faiss"]
+            index_instance = strategy_class()
+            index_instance.load_local(index_path)
+            INDEX_CACHE[session_id] = index_instance
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Session ID not found on disk.")
+    
+    # 2. Get the query vector from the embedding service
     logger.info(f"Getting embedding for query: '{request.query}'")
     try:
         embed_response = requests.post(settings.EMBEDDING_SERVICE_URL, json={"texts": [request.query]})
@@ -106,17 +118,19 @@ def ask_question(session_id: str, request: AskRequest):
     except requests.RequestException as e:
         raise HTTPException(status_code=503, detail=f"Error communicating with Embedding Service: {e}")
 
-    # ۳. جستجو در پایگاه داده برداری برای یافتن چانک‌های مرتبط
+    # 3. Retrieve relevant documents from the vector store
     logger.info("Retrieving relevant documents from vector store...")
     retrieved_docs = index_instance.search(query_vector, k=request.top_k)
+    if not retrieved_docs:
+        raise HTTPException(status_code=404, detail="No relevant documents found for the query.")
 
-    # ۴. ساخت زمینه (Context) برای ارسال به LLM
+    # 4. Create the context for the LLM
     context = "\n\n---\n\n".join([doc.page_content for doc in retrieved_docs])
     
-    # ۵. ساخت پرامپت نهایی
+    # 5. Create the final prompt for the LLM
     prompt_template = f"""
-    Based on the following context, please provide a concise and helpful answer to the user's question.
-    If the context does not contain the answer, say that you don't know.
+    Based on the following context, please provide a concise and helpful answer in Persian to the user's question.
+    If the context does not contain the answer, state that the answer is not in the provided documents.
 
     Context:
     ---
@@ -124,16 +138,25 @@ def ask_question(session_id: str, request: AskRequest):
     ---
 
     Question: {request.query}
-    Answer:
+    Answer (in Persian):
     """
     
-    # ۶. فراخوانی LLM برای تولید پاسخ
+    # 6. Call the LLM to generate the answer
     logger.info("Generating final answer with LLM...")
-    answer = llm.invoke(prompt_template).strip()
+    try:
+        answer = llm.invoke(prompt_template).strip()
+    except Exception as e:
+        logger.error(f"Error invoking LLM: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate answer from LLM.")
     
-    # ۷. آماده‌سازی و بازگرداندن پاسخ نهایی
+    # 7. Prepare the final response
     source_documents = [
-        SourceDocument(page_content=doc.page_content, metadata=doc.metadata, score=0.0) # score can be added if search returns it
+        SourceDocument(
+            page_content=doc.page_content,
+            metadata=doc.metadata,
+            # ✅ Here is the fix: explicitly cast the score to a standard Python float
+            score=float(doc.metadata.get('score', 0.0))
+        )
         for doc in retrieved_docs
     ]
     
