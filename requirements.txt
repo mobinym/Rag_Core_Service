@@ -1,11 +1,23 @@
 # rag_core_service/requirements.txt
 
+# --- Core Web Framework ---
 fastapi
 uvicorn[standard]
 pydantic
 requests
+
+# --- LangChain & RAG Components ---
 langchain-community
 langchain-ollama
+
+# --- Vector Stores ---
 faiss-cpu
 chromadb
 sentence-transformers
+
+# --- Monitoring & Logging ---
+# For Prometheus metrics endpoint
+prometheus-fastapi-instrumentator
+
+# For structured JSON logging
+python-json-logger
