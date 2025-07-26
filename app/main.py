@@ -5,12 +5,12 @@ import uuid
 import os
 import json
 from typing import Dict, Set
-
+from .monitoring import monitoring_logger
 import requests
 from fastapi import FastAPI, UploadFile, File, Form, Request, status
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
-
+import time
 from .errors import ServiceException, ERROR_CODES
 from .core.config import settings
 # ✅ ایمپورت کردن مدل‌های پاسخ جدید و قدیمی
@@ -20,6 +20,7 @@ from .strategies.vector_stores.impl import FAISSStrategy, ChromaStrategy
 from .strategies.retrievers.base import BaseRetrieverStrategy
 from .strategies.retrievers.impl import BasicRetriever, AdaptiveRetriever
 from langchain_ollama import OllamaLLM
+from prometheus_fastapi_instrumentator import Instrumentator
 
 # --- Basic Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -31,6 +32,11 @@ app = FastAPI(
     version="1.0"
 )
 
+# ✅ اضافه کردن این بخش برای مانیتورینگ با Prometheus
+Instrumentator().instrument(app).expose(app)
+@app.on_event("startup")
+async def startup():
+    pass
 
 # --- Exception Handlers (بدون تغییر) ---
 @app.exception_handler(ServiceException)
@@ -73,7 +79,7 @@ def format_rag_response(raw_response: AskResponse) -> str:
 RETRIEVERS: Dict[str, BaseRetrieverStrategy] = {"basic": BasicRetriever(), "adaptive": AdaptiveRetriever()}
 VECTOR_STORE_FACTORY: Dict[str, type[BaseVectorStoreStrategy]] = {"faiss": FAISSStrategy, "chroma": ChromaStrategy}
 INDEX_CACHE: Dict[str, BaseVectorStoreStrategy] = {}
-llm = OllamaLLM(model="qwen3:4b", base_url=settings.OLLAMA_BASE_URL)
+llm = OllamaLLM(model="gemma3", base_url=settings.OLLAMA_BASE_URL)
 
 
 # --- API Endpoints ---
@@ -133,7 +139,7 @@ def create_session(
 def ask_question(session_id: str, request: AskRequest):
     """Answers a question and returns a clean, formatted response."""
     logger.info(f"Received ask request for session '{session_id}' with strategy '{request.retrieval_strategy}'")
-    
+    start_time = time.time()
     # (بخش بارگذاری ایندکس بدون تغییر باقی می‌ماند)
     index_instance = INDEX_CACHE.get(session_id)
     if not index_instance:
@@ -165,14 +171,42 @@ def ask_question(session_id: str, request: AskRequest):
     
     try:
         # ✅ مرحله ۱: دریافت پاسخ خام از retriever
-        raw_response: AskResponse = retriever.retrieve(query=request.query, vector_store=index_instance.vectorstore, llm=llm, top_k=request.top_k)
-        
+        raw_response: AskResponse = retriever.retrieve(
+            query=request.query, 
+            vector_store=index_instance.vectorstore, 
+            llm=llm, 
+            top_k=request.top_k
+        )        
         # ✅ مرحله ۲: فرمت‌بندی پاسخ خام
         formatted_string = format_rag_response(raw_response)
+        end_time = time.time()
+        monitoring_data = {
+            "session_id": session_id,
+            "query": request.query,
+            "retrieval_strategy": request.retrieval_strategy,
+            "top_k": request.top_k,
+            "llm_answer": raw_response.answer,
+            "final_formatted_answer": formatted_string,
+            "retrieved_sources_count": len(raw_response.source_documents),
+            "source_pages": sorted(list({doc.metadata.get("page") for doc in raw_response.source_documents if doc.metadata.get("page") is not None})),
+            "response_time_seconds": round(end_time - start_time, 2),
+            # 'token_info': ... # استخراج اطلاعات توکن از Ollama نیاز به تغییرات بیشتر در LangChain دارد
+        }
+        monitoring_logger.info("RAG Request Processed", extra=monitoring_data)
+
         
         # ✅ مرحله ۳: بازگرداندن خروجی تمیز در مدل جدید
         return FormattedAskResponse(formatted_answer=formatted_string)
 
     except Exception as e:
         logger.error(f"Error during retrieval with '{request.retrieval_strategy}': {e}", exc_info=True)
+        # لاگ کردن خطای پردازش
+        monitoring_logger.error(
+            "RAG Request Failed", 
+            extra={
+                "session_id": session_id,
+                "query": request.query,
+                "error": str(e)
+            }
+        )
         raise ServiceException(status_code=500, error_code=40004, message=f"An error occurred during the retrieval and generation process: {e}")
