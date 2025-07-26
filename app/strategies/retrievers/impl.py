@@ -60,10 +60,8 @@ class AdaptiveRetriever(BaseRetrieverStrategy):
         if not documents:
             return "اطلاعاتی در متن ارائه نشده است."
         
-        context = "\n\n".join([
-            f"بخش: {doc.metadata.get('section', 'نامشخص')}, صفحه: {doc.metadata.get('page', 'نامشخص')}\n\n{doc.page_content}"
-            for doc in documents
-        ])
+        # ✅ اصلاح: فقط محتوای خالص متن به مدل داده می‌شود
+        context = "\n\n---\n\n".join([doc.page_content for doc in documents])
         
         chain = self.prompt_template | llm | StrOutputParser()
         return chain.invoke({"context": context, "query": query}).strip()

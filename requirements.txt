@@ -1,8 +1,11 @@
 # rag_core_service/requirements.txt
+
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
 requests
 langchain-community
 langchain-ollama
 faiss-cpu
+chromadb
+sentence-transformers

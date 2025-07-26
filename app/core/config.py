@@ -1,3 +1,4 @@
+#app/core/config.py
 class Settings:
     INDEX_DIR: str = "data/indices" 
     DOCUMENT_PROCESSOR_URL: str = "http://services.aiopt.io:7000/v1/chn/chunking/"

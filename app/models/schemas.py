@@ -1,9 +1,9 @@
 # rag_core_service/app/models/schemas.py
+
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 
 class Chunk(BaseModel):
-    # ✅ نام فیلد مطابق با خروجی سرویس document_processor اصلاح شد
     chunk_content: str
     metadata: Dict[str, Any]
 
@@ -18,11 +18,20 @@ class AskRequest(BaseModel):
     top_k: int = 3
 
 class SourceDocument(BaseModel):
-    # این نام استاندارد لانگ‌چین است و بهتر است همین باقی بماند
     page_content: str
     metadata: Dict[str, Any]
     score: float
 
 class AskResponse(BaseModel):
+    """
+    این مدل پاسخ خام و ساختاریافته است که توسط retriever تولید می‌شود.
+    """
     answer: str
     source_documents: List[SourceDocument]
+
+# ✅ مدل پاسخ جدید برای خروجی نهایی و تمیز به کاربر
+class FormattedAskResponse(BaseModel):
+    """
+    این مدل پاسخ نهایی است که به صورت فرمت‌شده و خوانا برای کاربر ارسال می‌شود.
+    """
+    formatted_answer: str
