@@ -13,7 +13,6 @@ from fastapi.exceptions import RequestValidationError
 import time
 from .errors import ServiceException, ERROR_CODES
 from .core.config import settings
-# ✅ ایمپورت کردن مدل‌های پاسخ جدید و قدیمی
 from .models.schemas import CreateSessionResponse, Chunk, AskRequest, AskResponse, FormattedAskResponse
 from .strategies.vector_stores.base import BaseVectorStoreStrategy
 from .strategies.vector_stores.impl import FAISSStrategy, ChromaStrategy
@@ -22,7 +21,7 @@ from .strategies.retrievers.impl import BasicRetriever, AdaptiveRetriever
 from langchain_ollama import OllamaLLM
 from prometheus_fastapi_instrumentator import Instrumentator
 
-# --- Basic Setup ---
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -32,13 +31,13 @@ app = FastAPI(
     version="1.0"
 )
 
-# ✅ اضافه کردن این بخش برای مانیتورینگ با Prometheus
+
 Instrumentator().instrument(app).expose(app)
 @app.on_event("startup")
 async def startup():
     pass
 
-# --- Exception Handlers (بدون تغییر) ---
+
 @app.exception_handler(ServiceException)
 async def service_exception_handler(request: Request, exc: ServiceException):
     return JSONResponse(status_code=exc.status_code, content={"success": False, "error": {"code": exc.error_code, "message": exc.message, "details": exc.details}})
@@ -79,15 +78,15 @@ def format_rag_response(raw_response: AskResponse) -> str:
 RETRIEVERS: Dict[str, BaseRetrieverStrategy] = {"basic": BasicRetriever(), "adaptive": AdaptiveRetriever()}
 VECTOR_STORE_FACTORY: Dict[str, type[BaseVectorStoreStrategy]] = {"faiss": FAISSStrategy, "chroma": ChromaStrategy}
 INDEX_CACHE: Dict[str, BaseVectorStoreStrategy] = {}
-llm = OllamaLLM(model="gemma3", base_url=settings.OLLAMA_BASE_URL)
+llm = OllamaLLM(model=settings.llm.model_name, base_url=settings.services.ollama_base_url)
 
 
 # --- API Endpoints ---
 @app.post("/sessions", response_model=CreateSessionResponse)
 def create_session(
     file: UploadFile = File(..., description="The document file to be processed (PDF, DOCX, etc.)"),
-    extractor_strategy: str = Form("pdfFA",enum=["docling", "pypdf", "pdfFA", "docx"], description="Text extraction strategy(Supported: docling, pypdf, pdfFA, docx)"),
-    chunker_strategy: str = Form("token_based",enum=["recursive", "custom_sentence", "ollama_semantic", "ollama_semantic_p", "token_based"],description="Text chunking strategy(Supported: recursive, custom_sentence, ollama_semantic, ollama_semantic_p, token_based)"),
+    extractor_strategy: str = Form(settings.defaults.extractor_strategy, description="Text extraction strategy"),
+    chunker_strategy: str = Form(settings.defaults.chunker_strategy, description="Text chunking strategy"),
     vector_store_strategy: str = Form("faiss", enum=["faiss", "chroma"], description="The vector store strategy to use")
 ):
     # (این اندپوینت بدون تغییر باقی می‌ماند)
@@ -95,7 +94,7 @@ def create_session(
     try:
         files = {'file': (file.filename, file.file, file.content_type)}
         params = {'extractor_strategy': extractor_strategy, 'chunker_strategy': chunker_strategy}
-        doc_response = requests.post(settings.DOCUMENT_PROCESSOR_URL, files=files, data=params, timeout=300)
+        doc_response = requests.post(settings.services.document_processor_url, files=files, data=params, timeout=300)
         doc_response.raise_for_status()
         processed_data = doc_response.json()
         chunks = [Chunk(**chunk_data) for chunk_data in processed_data['chunks']]
@@ -107,7 +106,7 @@ def create_session(
     logger.info("Step 2: Calling Embedding Service...")
     try:
         chunk_texts = [chunk.chunk_content for chunk in chunks]
-        embed_response = requests.post(settings.EMBEDDING_SERVICE_URL, json={"texts": chunk_texts}, timeout=180)
+        embed_response = requests.post(settings.services.embedding_service_url, json={"texts": chunk_texts}, timeout=180)
         embed_response.raise_for_status()
         vectors = embed_response.json()["vectors"]
         logger.info(f"Successfully received {len(vectors)} vectors.")
@@ -122,7 +121,7 @@ def create_session(
         chunk_metadatas = [chunk.metadata for chunk in chunks]
         index_instance.create_index(texts=chunk_texts, vectors=vectors, metadatas=chunk_metadatas)
         session_id = str(uuid.uuid4())
-        session_dir = os.path.join(settings.INDEX_DIR, session_id)
+        session_dir = os.path.join(settings.paths.index_dir, session_id)
         index_path = os.path.join(session_dir, "index")
         index_instance.save_local(index_path)
         config_path = os.path.join(session_dir, "index_config.json")
@@ -135,17 +134,17 @@ def create_session(
     return CreateSessionResponse(session_id=session_id, message="Session created and document indexed successfully.", total_chunks=len(chunks))
 
 
-@app.post("/sessions/{session_id}/ask", response_model=FormattedAskResponse) # ✅ تغییر مدل پاسخ
+@app.post("/sessions/{session_id}/ask", response_model=FormattedAskResponse) 
 def ask_question(session_id: str, request: AskRequest):
     """Answers a question and returns a clean, formatted response."""
     logger.info(f"Received ask request for session '{session_id}' with strategy '{request.retrieval_strategy}'")
     start_time = time.time()
-    # (بخش بارگذاری ایندکس بدون تغییر باقی می‌ماند)
+
     index_instance = INDEX_CACHE.get(session_id)
     if not index_instance:
         logger.info(f"Index not in cache. Loading from disk for session: {session_id}")
         try:
-            session_dir = os.path.join(settings.INDEX_DIR, session_id)
+            session_dir = os.path.join(settings.paths.index_dir, session_id)
             config_path = os.path.join(session_dir, "index_config.json")
             with open(config_path, 'r') as f:
                 config = json.load(f)
@@ -170,14 +169,14 @@ def ask_question(session_id: str, request: AskRequest):
         raise ServiceException(status_code=400, error_code=30001, message=f"Retrieval strategy '{request.retrieval_strategy}' is not supported.")
     
     try:
-        # ✅ مرحله ۱: دریافت پاسخ خام از retriever
+ 
         raw_response: AskResponse = retriever.retrieve(
             query=request.query, 
             vector_store=index_instance.vectorstore, 
             llm=llm, 
             top_k=request.top_k
         )        
-        # ✅ مرحله ۲: فرمت‌بندی پاسخ خام
+
         formatted_string = format_rag_response(raw_response)
         end_time = time.time()
         monitoring_data = {
@@ -190,12 +189,11 @@ def ask_question(session_id: str, request: AskRequest):
             "retrieved_sources_count": len(raw_response.source_documents),
             "source_pages": sorted(list({doc.metadata.get("page") for doc in raw_response.source_documents if doc.metadata.get("page") is not None})),
             "response_time_seconds": round(end_time - start_time, 2),
-            # 'token_info': ... # استخراج اطلاعات توکن از Ollama نیاز به تغییرات بیشتر در LangChain دارد
         }
         monitoring_logger.info("RAG Request Processed", extra=monitoring_data)
 
         
-        # ✅ مرحله ۳: بازگرداندن خروجی تمیز در مدل جدید
+
         return FormattedAskResponse(formatted_answer=formatted_string)
 
     except Exception as e:

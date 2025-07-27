@@ -21,3 +21,4 @@ prometheus-fastapi-instrumentator
 
 # For structured JSON logging
 python-json-logger
+PyYAML

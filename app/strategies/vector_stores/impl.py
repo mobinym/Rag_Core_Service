@@ -6,8 +6,7 @@ from langchain_community.vectorstores import FAISS, Chroma
 from langchain_community.embeddings import FakeEmbeddings
 from .base import BaseVectorStoreStrategy
 
-# ابعاد وکتورهای خروجی مدل امبدینگ شما
-# این مقدار باید با خروجی سرویس embedding شما یکسان باشد
+
 EMBEDDING_DIM = 1024
 
 class FAISSStrategy(BaseVectorStoreStrategy):
@@ -54,54 +53,40 @@ class ChromaStrategy(BaseVectorStoreStrategy):
         self._temp_metadatas = None
 
     def create_index(self, texts: List[str], vectors: List[List[float]], metadatas: List[dict]) -> None:
-        """
-        ✅ نهایی‌ترین اصلاح:
-        یک ایندکس موقت در حافظه با استفاده از متد add_texts و پارامتر embeddings می‌سازد.
-        """
         if not texts or not vectors:
             raise ValueError("Texts and vectors cannot be empty for index creation.")
         
-        # ذخیره موقت داده‌ها برای استفاده در متد save_local
+
         self._temp_texts = texts
         self._temp_vectors = vectors
         self._temp_metadatas = metadatas
 
-        # 1. یک نمونه خالی از Chroma می‌سازیم
+
         self.vectorstore = Chroma(embedding_function=self.embeddings)
         
-        # 2. ✅ از متد add_texts همراه با پارامتر embeddings استفاده می‌کنیم
         self.vectorstore.add_texts(
             texts=texts,
             metadatas=metadatas,
-            embeddings=vectors  # <--- این پارامتر کلیدی است
+            embeddings=vectors 
         )
         print("Chroma index created successfully in-memory.")
 
     def save_local(self, path: str) -> None:
-        """
-        ✅ نهایی‌ترین اصلاح:
-        یک دیتابیس دائمی Chroma در مسیر داده‌شده ایجاد و داده‌ها را در آن ذخیره می‌کند.
-        """
         if self._temp_texts is None:
             raise RuntimeError("Cannot save an uninitialized Chroma store. Call create_index first.")
         
-        # 1. یک نمونه Chroma جدید با قابلیت ذخیره‌سازی دائمی در مسیر path می‌سازیم
         persistent_chroma = Chroma(
             persist_directory=path, 
             embedding_function=self.embeddings
         )
 
-        # 2. ✅ از متد add_texts همراه با پارامتر embeddings برای افزودن داده‌ها استفاده می‌کنیم
         persistent_chroma.add_texts(
             texts=self._temp_texts,
             metadatas=self._temp_metadatas,
-            embeddings=self._temp_vectors  # <--- این پارامتر کلیدی است
+            embeddings=self._temp_vectors  
         )
         
-        # در نسخه‌های جدید chromadb، نیازی به persist صریح نیست اما برای اطمینان نگه می‌داریم
-        # persistent_chroma.persist()
 
-        # 4. آبجکت vectorstore کلاس را به نسخه دائمی آپدیت می‌کنیم
         self.vectorstore = persistent_chroma
         print(f"ChromaDB created and persisted at: {path}")
 

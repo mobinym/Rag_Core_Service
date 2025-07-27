@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
-
+from app.core.config import settings
 class Chunk(BaseModel):
     chunk_content: str
     metadata: Dict[str, Any]
@@ -14,8 +14,8 @@ class CreateSessionResponse(BaseModel):
 
 class AskRequest(BaseModel):
     query: str
-    retrieval_strategy: str = "adaptive"
-    top_k: int = 3
+    retrieval_strategy: str = settings.defaults.retrieval_strategy
+    top_k: int = settings.defaults.top_k
 
 class SourceDocument(BaseModel):
     page_content: str
@@ -23,15 +23,8 @@ class SourceDocument(BaseModel):
     score: float
 
 class AskResponse(BaseModel):
-    """
-    این مدل پاسخ خام و ساختاریافته است که توسط retriever تولید می‌شود.
-    """
     answer: str
     source_documents: List[SourceDocument]
 
-# ✅ مدل پاسخ جدید برای خروجی نهایی و تمیز به کاربر
 class FormattedAskResponse(BaseModel):
-    """
-    این مدل پاسخ نهایی است که به صورت فرمت‌شده و خوانا برای کاربر ارسال می‌شود.
-    """
     formatted_answer: str
