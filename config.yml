@@ -1,0 +1,27 @@
+# config.yml
+# Application configuration file
+
+
+paths:
+  index_dir: "data/indices"
+
+
+services:
+  document_processor_url: "http://services.aiopt.io:7000/v1/chn/chunking/"
+  embedding_service_url: "http://services.aiopt.io:5000/v1/emd/embed-text/"
+  ollama_base_url: "http://services.aiopt.io:11434"
+
+defaults:
+  extractor_strategy: "docling"
+  chunker_strategy: "token_based"
+  retrieval_strategy: "adaptive"
+  top_k: 5
+
+llm:
+  model_name: "gemma3:4b"
+
+
+retriever_settings:
+  adaptive:
+    min_answer_length: 150
+    retry_k: 7
