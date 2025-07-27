@@ -10,7 +10,7 @@ from .base import BaseVectorStoreStrategy
 EMBEDDING_DIM = 1024
 
 class FAISSStrategy(BaseVectorStoreStrategy):
-    """پیاده‌سازی استراتژی Vector Store با استفاده از FAISS."""
+
     
     def __init__(self, embeddings=None):
         super().__init__(embeddings=FakeEmbeddings(size=EMBEDDING_DIM))
@@ -44,7 +44,7 @@ class FAISSStrategy(BaseVectorStoreStrategy):
 
 
 class ChromaStrategy(BaseVectorStoreStrategy):
-    """پیاده‌سازی استراتژی Vector Store با استفاده از ChromaDB. (نسخه نهایی)"""
+
 
     def __init__(self, embeddings=None):
         super().__init__(embeddings=FakeEmbeddings(size=EMBEDDING_DIM))
@@ -56,28 +56,34 @@ class ChromaStrategy(BaseVectorStoreStrategy):
         if not texts or not vectors:
             raise ValueError("Texts and vectors cannot be empty for index creation.")
         
-
         self._temp_texts = texts
         self._temp_vectors = vectors
         self._temp_metadatas = metadatas
 
+        collection_metadata = {"hnsw:space": "cosine"}
 
-        self.vectorstore = Chroma(embedding_function=self.embeddings)
+        self.vectorstore = Chroma(
+            embedding_function=self.embeddings,
+            collection_metadata=collection_metadata 
+        )
         
         self.vectorstore.add_texts(
             texts=texts,
             metadatas=metadatas,
             embeddings=vectors 
         )
-        print("Chroma index created successfully in-memory.")
+        print("Chroma index created successfully in-memory with COSINE distance.")
 
     def save_local(self, path: str) -> None:
         if self._temp_texts is None:
             raise RuntimeError("Cannot save an uninitialized Chroma store. Call create_index first.")
         
+        collection_metadata = {"hnsw:space": "cosine"}
+        
         persistent_chroma = Chroma(
             persist_directory=path, 
-            embedding_function=self.embeddings
+            embedding_function=self.embeddings,
+            collection_metadata=collection_metadata 
         )
 
         persistent_chroma.add_texts(
@@ -86,12 +92,10 @@ class ChromaStrategy(BaseVectorStoreStrategy):
             embeddings=self._temp_vectors  
         )
         
-
         self.vectorstore = persistent_chroma
-        print(f"ChromaDB created and persisted at: {path}")
+        print(f"ChromaDB created and persisted at: {path} with COSINE distance.")
 
     def load_local(self, path: str) -> None:
-        """دیتابیس Chroma را از مسیر داده‌شده بارگذاری می‌کند."""
         if not os.path.exists(path):
             raise FileNotFoundError(f"No ChromaDB found at {path}")
 

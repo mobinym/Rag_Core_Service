@@ -12,7 +12,7 @@ services:
   ollama_base_url: "http://services.aiopt.io:11434"
 
 defaults:
-  extractor_strategy: "docling"
+  extractor_strategy: "pdfFA"
   chunker_strategy: "token_based"
   retrieval_strategy: "adaptive"
   top_k: 5

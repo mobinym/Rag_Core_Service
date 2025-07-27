@@ -5,10 +5,9 @@ from typing import List
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_community.vectorstores.faiss import FAISS
+from langchain_community.vectorstores import FAISS, Chroma
 from langchain_ollama import OllamaLLM
 import logging
-from sentence_transformers import SentenceTransformer # ✅ ایمپورت جدید
 
 from .base import BaseRetrieverStrategy
 from app.models.schemas import AskResponse, SourceDocument
@@ -16,66 +15,30 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-print("LOADING LOCAL BGE-M3 MODEL FOR DEBUGGING...")
-local_embedding_model = SentenceTransformer('BAAI/bge-m3')
-print("LOCAL MODEL LOADED.")
-def get_embedding_for_query_LOCAL_TEST(query: str) -> List[float]:
-    """
-    (تست موقت) کوئری را به صورت لوکال و با نرمال‌سازی صحیح امبد می‌کند.
-    """
-    print("DEBUG: Using LOCAL embedding function for query.")
-    return local_embedding_model.encode(
-        query,
-        normalize_embeddings=True
-    ).tolist()
-
 
 def get_embedding_for_query(query: str) -> List[float]:
-    """
-    سرویس امبدینگ خارجی را برای دریافت وکتور یک کوئری فراخوانی می‌کند.
-    """
-    try:
-        url = settings.services.embedding_service_url
-        payload = {"texts": [query]}
-        
-        # ✅ اضافه کردن لاگ برای دیباگ
-        print(f"DEBUG: Sending query '{query}' to embedding service at '{url}'")
-        print(f"DEBUG: Payload: {payload}")
-        
-        response = requests.post(url, json=payload, timeout=60)
-        response.raise_for_status()
-        
-        response_json = response.json()
-        print(f"DEBUG: Received response from embedding service: {response_json}")
-        
-        vector = response_json["vectors"][0]
-        print(f"DEBUG: Extracted vector starts with: {str(vector)[:80]}...") # نمایش ۸۰ کاراکتر اول وکتور
-        
-        return vector
 
+    try:
+        response = requests.post(settings.services.embedding_service_url, json={"texts": [query]}, timeout=60)
+        response.raise_for_status()
+        return response.json()["vectors"][0]
     except requests.RequestException as e:
         logger.error(f"Failed to get embedding for query: {e}")
-        print(f"DEBUG ERROR: Could not connect to embedding service: {e}") # ✅ لاگ خطا
         raise RuntimeError(f"Could not connect to embedding service: {e}")
     except (KeyError, IndexError) as e:
         logger.error(f"Invalid response from embedding service: {e}")
-        print(f"DEBUG ERROR: Invalid response from embedding service: {e}") # ✅ لاگ خطا
         raise RuntimeError(f"Invalid response from embedding service: {e}")
 
 
 class BasicRetriever(BaseRetrieverStrategy):
-    """اسناد را با دریافت امبدینگ کوئری از سرویس خارجی بازیابی می‌کند."""
     def retrieve(self, query: str, vector_store: FAISS, llm: OllamaLLM, top_k: int) -> AskResponse:
-        # ۱. دریافت وکتور کوئری از سرویس امبدینگ شما
-        query_vector = get_embedding_for_query_LOCAL_TEST(query)
+        query_vector = get_embedding_for_query(query)
 
-        # ۲. انجام جستجو با استفاده از وکتور به جای متن
         docs_with_scores = vector_store.similarity_search_with_score_by_vector(
             embedding=query_vector,
             k=top_k
         )
         
-        # ۳. تولید پاسخ (بدون تغییر)
         context = "\n\n---\n\n".join([doc.page_content for doc, score in docs_with_scores])
         prompt_template = PromptTemplate.from_template("Context: {context}\n\nQuestion: {question}\n\nAnswer:")
         chain = prompt_template | llm | StrOutputParser()
@@ -86,34 +49,34 @@ class BasicRetriever(BaseRetrieverStrategy):
 
 
 class AdaptiveRetriever(BaseRetrieverStrategy):
-    """Retriever پیشرفته، که اکنون از سرویس امبدینگ خارجی برای کوئری‌ها استفاده می‌کند."""
+    """Retriever پیشرفته، که از سرویس امبدینگ خارجی برای کوئری‌ها استفاده می‌کند."""
     def __init__(self):
         self.min_answer_length = settings.retriever_settings.adaptive.min_answer_length
         self.retry_k = settings.retriever_settings.adaptive.retry_k
         self.prompt_template = PromptTemplate(
             input_variables=["query", "context"],
             template="""[INST]
-You are an expert Persian-speaking analytical assistant. Your task is to accurately answer questions based *only* on the provided context.
+شما یک دستیار تحلیلی فارسی‌زبان و متخصص هستید. وظیفه شما این است که فقط بر اساس **متن ارائه‌شده**، به سؤالات به‌دقت و با دقت پاسخ دهید.
 
-Follow these steps to generate your answer:
-1.  **Analyze the User's Question:** Understand the core intent of the user's query: '{query}'.
-2.  **Scan the Context:** Carefully read the entire provided context to find the most relevant sentences or data points that directly answer the question.
-3.  **Synthesize the Answer:** Formulate a clear, concise, and direct answer in Persian based *exclusively* on the information you found.
-4.  **Cite Sources (if available):** If the context provides clear source information like page or section numbers for the relevant data, mention it briefly in parentheses at the end of your answer.
-5.  **Fallback:** If after careful analysis you cannot find the answer within the context, respond with *only* this exact phrase: "اطلاعاتی در متن ارائه نشده است."
+برای تولید پاسخ، مراحل زیر را دنبال کنید:
 
-**Context:**
+1.  **تحلیل پرسش کاربر:** هدف اصلی پرسش زیر را به‌درستی درک کنید: «{query}».
+2.  **بررسی دقیق متن:** تمام متن داده‌شده را با دقت بخوانید و جملات یا داده‌هایی را که مستقیماً به پرسش پاسخ می‌دهند، پیدا کنید.
+3.  **تدوین پاسخ:** یک پاسخ روشن، مختصر و مستقیم به زبان فارسی بنویسید که فقط بر اساس اطلاعات موجود در متن باشد.
+4.  **ارجاع به منبع (در صورت وجود):** اگر در متن اطلاعات منبع مثل شماره صفحه یا بخش آمده باشد، در پایان پاسخ به‌صورت کوتاه به آن اشاره کنید (مثلاً: «(صفحه ۱۲)»).
+5.  **در صورت نبود اطلاعات:** اگر پس از بررسی دقیق متن، پاسخی برای پرسش در آن پیدا نکردید، دقیقاً فقط این عبارت را بنویسید: «اطلاعاتی در متن ارائه نشده است.»
+
+**متن:**
 ---
 {context}
 ---
 
-**User's Question:** {query}
+**پرسش کاربر:** {query}
 [/INST]
 
-**Answer:**
+**پاسخ:**
 """
         )
-
 
     def _generate_answer(self, query: str, documents: List[Document], llm: OllamaLLM) -> str:
         if not documents:
@@ -123,34 +86,36 @@ Follow these steps to generate your answer:
         return chain.invoke({"context": context, "query": query}).strip()
 
     def retrieve(self, query: str, vector_store: FAISS, llm: OllamaLLM, top_k: int) -> AskResponse:
-        # ۱. دریافت وکتور کوئری از سرویس امبدینگ
-        query_vector = get_embedding_for_query_LOCAL_TEST(query)
+        query_vector = get_embedding_for_query(query)
         
-        # ۲. انجام جستجو با استفاده از وکتور
-        docs_with_scores = vector_store.similarity_search_with_score_by_vector(
-            embedding=query_vector,
-            k=top_k
-        )
-            # ✅ کد دیباگ: چاپ محتوای اسنادی که بازیابی شده‌اند
-        print("\n--- DEBUG: RETRIEVED DOCUMENTS ---")
-        if not docs_with_scores:
-            print("!!! NO DOCUMENTS RETRIEVED !!!")
+        docs_with_scores = []
+        if isinstance(vector_store, FAISS):
+            logger.info("Using FAISS search method.")
+            docs_with_scores = vector_store.similarity_search_with_score_by_vector(
+                embedding=query_vector,
+                k=top_k
+            )
+        elif isinstance(vector_store, Chroma):
+            logger.info("Using Chroma search method.")
+            retrieved_docs = vector_store.similarity_search_by_vector(
+                embedding=query_vector,
+                k=top_k
+            )
+            docs_with_scores = [(doc, 0.0) for doc in retrieved_docs]
         else:
-            for i, (doc, score) in enumerate(docs_with_scores):
-                print(f"--- Document {i+1} | Score: {score} ---")
-                print(doc.page_content)
-                print("-" * 30)
-        print("--- END DEBUG ---\n")
+            raise TypeError(f"Unsupported vector store type: {type(vector_store)}")
 
         documents = [doc for doc, score in docs_with_scores]
         answer = self._generate_answer(query, documents, llm)
         
         if len(answer) < self.min_answer_length and top_k < self.retry_k:
             logger.warning(f"پاسخ اولیه خیلی کوتاه است. تلاش مجدد با k={self.retry_k}.")
-            docs_with_scores = vector_store.similarity_search_with_score_by_vector(
-                embedding=query_vector,
-                k=self.retry_k
-            )
+            if isinstance(vector_store, FAISS):
+                docs_with_scores = vector_store.similarity_search_with_score_by_vector(embedding=query_vector, k=self.retry_k)
+            elif isinstance(vector_store, Chroma):
+                retrieved_docs = vector_store.similarity_search_by_vector(embedding=query_vector, k=self.retry_k)
+                docs_with_scores = [(doc, 0.0) for doc in retrieved_docs]
+
             documents = [doc for doc, score in docs_with_scores]
             answer = self._generate_answer(query, documents, llm)
             
