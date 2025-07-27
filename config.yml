@@ -3,7 +3,7 @@
 
 
 paths:
-  index_dir: "data/indices"
+  index_dir: "/data/indices"
 
 
 services:
