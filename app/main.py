@@ -51,27 +51,37 @@ async def generic_exception_handler(request: Request, exc: Exception):
     logger.error(f"An unexpected error occurred: {exc}", exc_info=True)
     return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"success": False, "error": {"code": 99999, "message": ERROR_CODES[99999]}})
 
+from collections import defaultdict # Make sure this import is at the top of the file
 
-# --- ✅ Helper Function for Formatting ---
 def format_rag_response(raw_response: AskResponse) -> str:
     """
-    پاسخ خام RAG را به یک متن فرمت‌شده و تمیز Markdown تبدیل می‌کند.
+    Converts the raw RAG response to a clean, formatted Markdown text,
+    grouping sources by their document ID.
     """
     answer = raw_response.answer
-    source_pages: Set[int] = set()
+    
+    # Use a defaultdict to group pages by their doc_uuid
+    sources = defaultdict(set)
     for doc in raw_response.source_documents:
-        if "page" in doc.metadata and doc.metadata["page"] is not None:
-            source_pages.add(doc.metadata["page"])
+        metadata = doc.metadata
+        # Assumes the 'doc_uuid' key exists in the metadata
+        doc_uuid = metadata.get("doc_uuid", "Unknown Document")
+        page_num = metadata.get("page")
+        
+        if page_num is not None:
+            sources[doc_uuid].add(page_num)
             
+    # Build the final string using Markdown format
     formatted_output = f"**پاسخ:**\n\n{answer}"
     
-    if source_pages:
+    if sources:
         formatted_output += "\n\n---\n\n**منابع:**\n"
-        for page_num in sorted(list(source_pages)):
-            formatted_output += f"\n* صفحه {page_num}"
+        for doc_uuid, pages in sources.items():
+            # Convert the list of pages to a readable string
+            page_str = ", ".join(map(str, sorted(list(pages))))
+            formatted_output += f"\n* سند: `{doc_uuid}` (صفحات: {page_str})"
             
     return formatted_output
-
 
 # --- Service Configuration ---
 RETRIEVERS: Dict[str, BaseRetrieverStrategy] = {"basic": BasicRetriever(), "adaptive": AdaptiveRetriever()}
@@ -100,6 +110,12 @@ def add_to_index(
         
         response_data = doc_response.json()
         chunks = [Chunk(**chunk_data) for chunk_data in response_data['chunks']]
+        document_uuid = str(uuid.uuid4())
+        
+        # ۲. این UUID را به متادیتای تمام چانک‌ها اضافه می‌کنیم
+        for chunk in chunks:
+            chunk.metadata['doc_uuid'] = document_uuid
+
         chunk_texts = [c.chunk_content for c in chunks]
         chunk_metadatas = [c.metadata for c in chunks]
 
