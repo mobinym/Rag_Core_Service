@@ -13,13 +13,14 @@ from fastapi.exceptions import RequestValidationError
 import time
 from .errors import ServiceException, ERROR_CODES
 from .core.config import settings
-from .models.schemas import CreateSessionResponse, Chunk, AskRequest, AskResponse, FormattedAskResponse
+from .models.schemas import CreateSessionResponse, AskRequest, AskResponse, StructuredAskResponse, Chunk # ✅ تغییر ایمپورت
 from .strategies.vector_stores.base import BaseVectorStoreStrategy
 from .strategies.vector_stores.impl import FAISSStrategy, ChromaStrategy
 from .strategies.retrievers.base import BaseRetrieverStrategy
 from .strategies.retrievers.impl import BasicRetriever, AdaptiveRetriever
 from langchain_ollama import OllamaLLM
 from prometheus_fastapi_instrumentator import Instrumentator
+from collections import defaultdict # Make sure this import is at the top of the file
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -51,37 +52,35 @@ async def generic_exception_handler(request: Request, exc: Exception):
     logger.error(f"An unexpected error occurred: {exc}", exc_info=True)
     return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"success": False, "error": {"code": 99999, "message": ERROR_CODES[99999]}})
 
-from collections import defaultdict # Make sure this import is at the top of the file
 
-def format_rag_response(raw_response: AskResponse) -> str:
+def structure_final_response(raw_response: AskResponse) -> StructuredAskResponse:
     """
-    Converts the raw RAG response to a clean, formatted Markdown text,
-    grouping sources by their document ID.
+    پاسخ خام RAG را به یک ساختار JSON تمیز و دقیق تبدیل می‌کند.
     """
     answer = raw_response.answer
     
-    # Use a defaultdict to group pages by their doc_uuid
-    sources = defaultdict(set)
+    # گروه‌بندی چانک‌ها بر اساس شناسه سند (doc_uuid)
+    grouped_chunks = defaultdict(list)
     for doc in raw_response.source_documents:
         metadata = doc.metadata
-        # Assumes the 'doc_uuid' key exists in the metadata
-        doc_uuid = metadata.get("doc_uuid", "Unknown Document")
-        page_num = metadata.get("page")
+        doc_uuid = metadata.get("doc_uuid", "unknown_document")
         
-        if page_num is not None:
-            sources[doc_uuid].add(page_num)
-            
-    # Build the final string using Markdown format
-    formatted_output = f"**پاسخ:**\n\n{answer}"
-    
-    if sources:
-        formatted_output += "\n\n---\n\n**منابع:**\n"
-        for doc_uuid, pages in sources.items():
-            # Convert the list of pages to a readable string
-            page_str = ", ".join(map(str, sorted(list(pages))))
-            formatted_output += f"\n* سند: `{doc_uuid}` (صفحات: {page_str})"
-            
-    return formatted_output
+        # ساخت یک آبجکت از چانک منبع
+        ref_chunk = {
+            "content": doc.page_content,
+            "page": metadata.get("page", 0)
+        }
+        grouped_chunks[doc_uuid].append(ref_chunk)
+        
+    # ساخت لیست نهایی منابع
+    references = []
+    for doc_uuid, chunks in grouped_chunks.items():
+        references.append({
+            "doc_uuid": doc_uuid,
+            "chunks": chunks
+        })
+        
+    return StructuredAskResponse(answer=answer, references=references)
 
 # --- Service Configuration ---
 RETRIEVERS: Dict[str, BaseRetrieverStrategy] = {"basic": BasicRetriever(), "adaptive": AdaptiveRetriever()}
@@ -162,7 +161,7 @@ def add_to_index(
         raise ServiceException(status_code=500, error_code=40002, message=f"Failed to create or update index '{index_name}': {e}")
 
 
-@app.post("/indexes/{index_name}/ask", response_model=FormattedAskResponse, tags=["Indexes"])
+@app.post("/indexes/{index_name}/ask", response_model=StructuredAskResponse, tags=["Indexes"])
 def ask_from_index(index_name: str, request: AskRequest):
     """Asks a question from a named index."""
     logger.info(f"API request for index '{index_name}' with strategy '{request.retrieval_strategy}'")
@@ -196,15 +195,15 @@ def ask_from_index(index_name: str, request: AskRequest):
             "retrieval_strategy": request.retrieval_strategy,
             "top_k": request.top_k,
             "llm_answer": raw_response.answer,
-            "final_formatted_answer": format_rag_response(raw_response),
+            "structured_response ": structure_final_response(raw_response),
             "retrieved_sources_count": len(raw_response.source_documents),
             "source_pages": sorted(list({doc.metadata.get("page") for doc in raw_response.source_documents if doc.metadata.get("page") is not None})),
             "response_time_seconds": round(end_time - start_time, 2),
         }
         monitoring_logger.info("RAG Request Processed", extra=monitoring_data)
         
-        formatted_string = format_rag_response(raw_response)
-        return FormattedAskResponse(formatted_answer=formatted_string)
+        structured_response = structure_final_response(raw_response)
+        return structured_response
         
     except Exception as e:
         logger.error(f"Error during retrieval for index '{index_name}': {e}", exc_info=True)
