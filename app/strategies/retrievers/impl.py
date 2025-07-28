@@ -5,10 +5,11 @@ from typing import List
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
-from langchain_community.vectorstores import FAISS, Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaLLM
 import logging
-
+from langchain_core.vectorstores import VectorStore # ✅ این خط را اضافه کنید
+from langchain_chroma import Chroma
 from .base import BaseRetrieverStrategy
 from app.models.schemas import AskResponse, SourceDocument
 from app.core.config import settings
@@ -31,13 +32,18 @@ def get_embedding_for_query(query: str) -> List[float]:
 
 
 class BasicRetriever(BaseRetrieverStrategy):
-    def retrieve(self, query: str, vector_store: FAISS, llm: OllamaLLM, top_k: int) -> AskResponse:
+    def retrieve(self, query: str, vector_store: VectorStore, llm: OllamaLLM, top_k: int) -> AskResponse:
         query_vector = get_embedding_for_query(query)
 
-        docs_with_scores = vector_store.similarity_search_with_score_by_vector(
-            embedding=query_vector,
-            k=top_k
-        )
+        docs_with_scores = []
+        if isinstance(vector_store, FAISS):
+            docs_with_scores = vector_store.similarity_search_with_score_by_vector(embedding=query_vector, k=top_k)
+        elif isinstance(vector_store, Chroma):
+            retrieved_docs = vector_store.similarity_search_by_vector(embedding=query_vector, k=top_k)
+            docs_with_scores = [(doc, 0.0) for doc in retrieved_docs]
+        else:
+            raise TypeError(f"Unsupported vector store type: {type(vector_store)}")
+
         
         context = "\n\n---\n\n".join([doc.page_content for doc, score in docs_with_scores])
         prompt_template = PromptTemplate.from_template("Context: {context}\n\nQuestion: {question}\n\nAnswer:")
@@ -46,7 +52,6 @@ class BasicRetriever(BaseRetrieverStrategy):
         
         source_documents = [SourceDocument(page_content=doc.page_content, metadata=doc.metadata, score=float(score)) for doc, score in docs_with_scores]
         return AskResponse(answer=answer, source_documents=source_documents)
-
 
 class AdaptiveRetriever(BaseRetrieverStrategy):
     """Retriever پیشرفته، که از سرویس امبدینگ خارجی برای کوئری‌ها استفاده می‌کند."""
@@ -85,7 +90,7 @@ class AdaptiveRetriever(BaseRetrieverStrategy):
         chain = self.prompt_template | llm | StrOutputParser()
         return chain.invoke({"context": context, "query": query}).strip()
 
-    def retrieve(self, query: str, vector_store: FAISS, llm: OllamaLLM, top_k: int) -> AskResponse:
+    def retrieve(self, query: str, vector_store: VectorStore, llm: OllamaLLM, top_k: int) -> AskResponse:
         query_vector = get_embedding_for_query(query)
         
         docs_with_scores = []

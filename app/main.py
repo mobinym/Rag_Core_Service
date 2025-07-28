@@ -37,7 +37,6 @@ Instrumentator().instrument(app).expose(app)
 async def startup():
     pass
 
-
 @app.exception_handler(ServiceException)
 async def service_exception_handler(request: Request, exc: ServiceException):
     return JSONResponse(status_code=exc.status_code, content={"success": False, "error": {"code": exc.error_code, "message": exc.message, "details": exc.details}})
@@ -82,129 +81,116 @@ llm = OllamaLLM(model=settings.llm.model_name, base_url=settings.services.ollama
 
 
 # --- API Endpoints ---
-@app.post("/sessions", response_model=CreateSessionResponse)
-def create_session(
-    file: UploadFile = File(..., description="The document file to be processed (PDF, DOCX, etc.)"),
-    extractor_strategy: str = Form(settings.defaults.extractor_strategy, description="Text extraction strategy"),
-    chunker_strategy: str = Form(settings.defaults.chunker_strategy, description="Text chunking strategy"),
-    vector_store_strategy: str = Form("faiss", enum=["faiss", "chroma"], description="The vector store strategy to use")
+@app.post("/indexes/{index_name}/add", response_model=CreateSessionResponse, tags=["Indexes"])
+def add_to_index(
+    index_name: str,
+    file: UploadFile = File(...),
+    vector_store_strategy: str = Form("faiss", enum=["faiss", "chroma"]),
+    extractor_strategy: str = Form(settings.defaults.extractor_strategy),
+    chunker_strategy: str = Form(settings.defaults.chunker_strategy)
 ):
-    # (این اندپوینت بدون تغییر باقی می‌ماند)
-    logger.info("Step 1: Calling Document Processor Service...")
+    """Adds a document to a named index. If the index doesn't exist, it will be created."""
+    logger.info(f"Request to add document to index '{index_name}'...")
+    
     try:
         files = {'file': (file.filename, file.file, file.content_type)}
         params = {'extractor_strategy': extractor_strategy, 'chunker_strategy': chunker_strategy}
         doc_response = requests.post(settings.services.document_processor_url, files=files, data=params, timeout=300)
         doc_response.raise_for_status()
-        processed_data = doc_response.json()
-        chunks = [Chunk(**chunk_data) for chunk_data in processed_data['chunks']]
-        logger.info(f"Successfully received {len(chunks)} chunks.")
-    except requests.RequestException as e:
-        raise ServiceException(status_code=503, error_code=40001, message=f"The Document Processor service is unavailable: {e}")
-    if not chunks:
-        raise ServiceException(status_code=400, error_code=30003, message=ERROR_CODES[30003])
-    logger.info("Step 2: Calling Embedding Service...")
-    try:
-        chunk_texts = [chunk.chunk_content for chunk in chunks]
+        
+        response_data = doc_response.json()
+        chunks = [Chunk(**chunk_data) for chunk_data in response_data['chunks']]
+        chunk_texts = [c.chunk_content for c in chunks]
+        chunk_metadatas = [c.metadata for c in chunks]
+
         embed_response = requests.post(settings.services.embedding_service_url, json={"texts": chunk_texts}, timeout=180)
         embed_response.raise_for_status()
         vectors = embed_response.json()["vectors"]
-        logger.info(f"Successfully received {len(vectors)} vectors.")
     except requests.RequestException as e:
-        raise ServiceException(status_code=503, error_code=40001, message=f"The Embedding service is unavailable: {e}")
-    logger.info(f"Step 3: Creating index with '{vector_store_strategy}' strategy...")
-    strategy_class = VECTOR_STORE_FACTORY.get(vector_store_strategy)
-    if not strategy_class:
-        raise ServiceException(status_code=400, error_code=30001, message=f"Vector store strategy '{vector_store_strategy}' is not supported.")
+        raise ServiceException(status_code=503, error_code=40001, message=f"An external service is unavailable: {e}")
+
+    if not vectors:
+        raise ServiceException(status_code=400, error_code=30003, message=ERROR_CODES[30003])
+
     try:
-        index_instance = strategy_class()
-        chunk_metadatas = [chunk.metadata for chunk in chunks]
-        index_instance.create_index(texts=chunk_texts, vectors=vectors, metadatas=chunk_metadatas)
-        session_id = str(uuid.uuid4())
-        session_dir = os.path.join(settings.paths.index_dir, session_id)
-        index_path = os.path.join(session_dir, "index")
-        index_instance.save_local(index_path)
-        config_path = os.path.join(session_dir, "index_config.json")
-        with open(config_path, 'w') as f:
-            json.dump({"vector_store_strategy": vector_store_strategy}, f)
-        INDEX_CACHE[session_id] = index_instance
-    except Exception as e:
-        logger.error(f"Failed during index creation or saving: {e}", exc_info=True)
-        raise ServiceException(status_code=500, error_code=40002, message=f"Failed to create or save the index: {e}")
-    return CreateSessionResponse(session_id=session_id, message="Session created and document indexed successfully.", total_chunks=len(chunks))
-
-
-@app.post("/sessions/{session_id}/ask", response_model=FormattedAskResponse) 
-def ask_question(session_id: str, request: AskRequest):
-    """Answers a question and returns a clean, formatted response."""
-    logger.info(f"Received ask request for session '{session_id}' with strategy '{request.retrieval_strategy}'")
-    start_time = time.time()
-
-    index_instance = INDEX_CACHE.get(session_id)
-    if not index_instance:
-        logger.info(f"Index not in cache. Loading from disk for session: {session_id}")
-        try:
-            session_dir = os.path.join(settings.paths.index_dir, session_id)
-            config_path = os.path.join(session_dir, "index_config.json")
-            with open(config_path, 'r') as f:
+        index_dir = os.path.join(settings.paths.index_dir, index_name)
+        config_path = os.path.join(index_dir, "index_config.json")
+        index_store_path = os.path.join(index_dir, "index")
+        
+        if os.path.exists(index_dir):
+            logger.info(f"Index '{index_name}' exists. Adding new documents.")
+            with open(config_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
-            vector_store_strategy = config.get("vector_store_strategy")
-            if not vector_store_strategy:
-                 raise ServiceException(status_code=404, error_code=30004, message="Session is corrupted: vector store strategy is unknown.")
+            strategy_class = VECTOR_STORE_FACTORY[config["vector_store_strategy"]]
+            index_instance = strategy_class()
+            index_instance.load_local(index_store_path)
+            index_instance.add_documents(texts=chunk_texts, vectors=vectors, metadatas=chunk_metadatas)
+            # index_instance.save_local(index_store_path)
+            message = f"Document successfully added to index '{index_name}'."
+        else:
+            logger.info(f"Index '{index_name}' not found. Creating a new one.")
+            os.makedirs(index_dir, exist_ok=True)
             strategy_class = VECTOR_STORE_FACTORY[vector_store_strategy]
             index_instance = strategy_class()
-            index_path = os.path.join(session_dir, "index")
-            index_instance.load_local(index_path)
-            INDEX_CACHE[session_id] = index_instance
-            logger.info(f"Successfully loaded index with '{vector_store_strategy}' strategy.")
-        except FileNotFoundError:
-            raise ServiceException(status_code=404, error_code=30002, message=f"Session ID '{session_id}' not found on disk.")
-        except Exception as e:
-            raise ServiceException(status_code=500, error_code=40003, message=f"Failed to load the index from disk: {e}")
-    if not index_instance.vectorstore:
-        raise ServiceException(status_code=500, error_code=30004, message="Vector store for this session is available but not initialized correctly.")
+            index_instance.create_index(texts=chunk_texts, vectors=vectors, metadatas=chunk_metadatas)
+            index_instance.save_local(index_store_path)
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump({"vector_store_strategy": vector_store_strategy}, f)
+            message = f"New index '{index_name}' created successfully."
 
-    retriever = RETRIEVERS.get(request.retrieval_strategy)
-    if not retriever:
-        raise ServiceException(status_code=400, error_code=30001, message=f"Retrieval strategy '{request.retrieval_strategy}' is not supported.")
+        INDEX_CACHE[index_name] = index_instance
+        return CreateSessionResponse(session_id=index_name, message=message, total_chunks=len(vectors))
+        
+    except Exception as e:
+        logger.error(f"Failed during index operation for '{index_name}': {e}", exc_info=True)
+        raise ServiceException(status_code=500, error_code=40002, message=f"Failed to create or update index '{index_name}': {e}")
+
+
+@app.post("/indexes/{index_name}/ask", response_model=FormattedAskResponse, tags=["Indexes"])
+def ask_from_index(index_name: str, request: AskRequest):
+    """Asks a question from a named index."""
+    logger.info(f"API request for index '{index_name}' with strategy '{request.retrieval_strategy}'")
+    start_time = time.time()
     
+    index_instance = INDEX_CACHE.get(index_name)
+    if not index_instance:
+        logger.info(f"Index not in cache. Loading from disk for index: {index_name}")
+        try:
+            index_dir = os.path.join(settings.paths.index_dir, index_name)
+            config_path = os.path.join(index_dir, "index_config.json")
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            strategy_class = VECTOR_STORE_FACTORY[config["vector_store_strategy"]]
+            index_instance = strategy_class()
+            index_instance.load_local(os.path.join(index_dir, "index"))
+            INDEX_CACHE[index_name] = index_instance
+        except FileNotFoundError:
+            raise ServiceException(status_code=404, error_code=30002, message=f"Index '{index_name}' not found on disk.")
+        except Exception as e:
+            raise ServiceException(status_code=500, error_code=40003, message=f"Failed to load index '{index_name}': {e}")
+            
+    retriever = RETRIEVERS.get(request.retrieval_strategy)
     try:
- 
-        raw_response: AskResponse = retriever.retrieve(
-            query=request.query, 
-            vector_store=index_instance.vectorstore, 
-            llm=llm, 
-            top_k=request.top_k
-        )        
-
-        formatted_string = format_rag_response(raw_response)
+        raw_response: AskResponse = retriever.retrieve(query=request.query, vector_store=index_instance.vectorstore, llm=llm, top_k=request.top_k)
         end_time = time.time()
+        
         monitoring_data = {
-            "session_id": session_id,
+            "session_id": index_name,
             "query": request.query,
             "retrieval_strategy": request.retrieval_strategy,
             "top_k": request.top_k,
             "llm_answer": raw_response.answer,
-            "final_formatted_answer": formatted_string,
+            "final_formatted_answer": format_rag_response(raw_response),
             "retrieved_sources_count": len(raw_response.source_documents),
             "source_pages": sorted(list({doc.metadata.get("page") for doc in raw_response.source_documents if doc.metadata.get("page") is not None})),
             "response_time_seconds": round(end_time - start_time, 2),
         }
         monitoring_logger.info("RAG Request Processed", extra=monitoring_data)
-
         
-
+        formatted_string = format_rag_response(raw_response)
         return FormattedAskResponse(formatted_answer=formatted_string)
-
+        
     except Exception as e:
-        logger.error(f"Error during retrieval with '{request.retrieval_strategy}': {e}", exc_info=True)
-        # لاگ کردن خطای پردازش
-        monitoring_logger.error(
-            "RAG Request Failed", 
-            extra={
-                "session_id": session_id,
-                "query": request.query,
-                "error": str(e)
-            }
-        )
-        raise ServiceException(status_code=500, error_code=40004, message=f"An error occurred during the retrieval and generation process: {e}")
+        logger.error(f"Error during retrieval for index '{index_name}': {e}", exc_info=True)
+        monitoring_logger.error("RAG Request Failed", extra={"session_id": index_name, "query": request.query, "error": str(e)})
+        raise ServiceException(status_code=500, error_code=40004, message=f"An error occurred during retrieval/generation: {e}")

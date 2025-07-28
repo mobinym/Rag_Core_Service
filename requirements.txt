@@ -7,9 +7,9 @@ pydantic
 requests
 
 # --- LangChain & RAG Components ---
-langchain-community
+langchain-community>=0.2.0
 langchain-ollama
-
+langchain-chroma 
 # --- Vector Stores ---
 faiss-cpu
 chromadb

@@ -2,7 +2,8 @@
 
 import os
 from typing import List
-from langchain_community.vectorstores import FAISS, Chroma
+from langchain_community.vectorstores import FAISS
+from langchain_chroma import Chroma
 from langchain_community.embeddings import FakeEmbeddings
 from .base import BaseVectorStoreStrategy
 
@@ -42,6 +43,13 @@ class FAISSStrategy(BaseVectorStoreStrategy):
         self.vectorstore = FAISS.load_local(path, self.embeddings, allow_dangerous_deserialization=True)
         print(f"FAISS index loaded from: {path}")
 
+    def add_documents(self, texts: List[str], vectors: List[List[float]], metadatas: List[dict]):
+        """اسناد جدید را به ایندکس FAISS موجود اضافه می‌کند."""
+        if not self.vectorstore:
+            raise RuntimeError("Vector store is not loaded or created yet.")
+        text_embedding_pairs = list(zip(texts, vectors))
+        self.vectorstore.add_embeddings(text_embeddings=text_embedding_pairs, metadatas=metadatas)
+        print(f"Added {len(texts)} new documents to the existing FAISS index.")
 
 class ChromaStrategy(BaseVectorStoreStrategy):
 
@@ -101,3 +109,10 @@ class ChromaStrategy(BaseVectorStoreStrategy):
 
         self.vectorstore = Chroma(persist_directory=path, embedding_function=self.embeddings)
         print(f"ChromaDB loaded from: {path}")
+
+    def add_documents(self, texts: List[str], vectors: List[List[float]], metadatas: List[dict]):
+        """اسناد جدید را به ایندکس Chroma موجود اضافه می‌کند."""
+        if not self.vectorstore:
+            raise RuntimeError("Vector store is not loaded or created yet.")
+        self.vectorstore.add_texts(texts=texts, metadatas=metadatas, embeddings=vectors)
+        print(f"Added {len(texts)} new documents to the existing Chroma index.")
