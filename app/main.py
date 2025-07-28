@@ -13,14 +13,14 @@ from fastapi.exceptions import RequestValidationError
 import time
 from .errors import ServiceException, ERROR_CODES
 from .core.config import settings
-from .models.schemas import CreateSessionResponse, AskRequest, AskResponse, StructuredAskResponse, Chunk # ✅ تغییر ایمپورت
+from .models.schemas import CreateSessionResponse, AskRequest, AskResponse, StructuredAskResponse, Chunk 
 from .strategies.vector_stores.base import BaseVectorStoreStrategy
 from .strategies.vector_stores.impl import FAISSStrategy, ChromaStrategy
 from .strategies.retrievers.base import BaseRetrieverStrategy
 from .strategies.retrievers.impl import BasicRetriever, AdaptiveRetriever
 from langchain_ollama import OllamaLLM
 from prometheus_fastapi_instrumentator import Instrumentator
-from collections import defaultdict # Make sure this import is at the top of the file
+from collections import defaultdict 
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -54,25 +54,20 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 
 def structure_final_response(raw_response: AskResponse) -> StructuredAskResponse:
-    """
-    پاسخ خام RAG را به یک ساختار JSON تمیز و دقیق تبدیل می‌کند.
-    """
     answer = raw_response.answer
     
-    # گروه‌بندی چانک‌ها بر اساس شناسه سند (doc_uuid)
     grouped_chunks = defaultdict(list)
     for doc in raw_response.source_documents:
         metadata = doc.metadata
         doc_uuid = metadata.get("doc_uuid", "unknown_document")
         
-        # ساخت یک آبجکت از چانک منبع
         ref_chunk = {
             "content": doc.page_content,
             "page": metadata.get("page", 0)
         }
         grouped_chunks[doc_uuid].append(ref_chunk)
         
-    # ساخت لیست نهایی منابع
+   
     references = []
     for doc_uuid, chunks in grouped_chunks.items():
         references.append({
@@ -111,7 +106,6 @@ def add_to_index(
         chunks = [Chunk(**chunk_data) for chunk_data in response_data['chunks']]
         document_uuid = str(uuid.uuid4())
         
-        # ۲. این UUID را به متادیتای تمام چانک‌ها اضافه می‌کنیم
         for chunk in chunks:
             chunk.metadata['doc_uuid'] = document_uuid
 
@@ -140,7 +134,6 @@ def add_to_index(
             index_instance = strategy_class()
             index_instance.load_local(index_store_path)
             index_instance.add_documents(texts=chunk_texts, vectors=vectors, metadatas=chunk_metadatas)
-            # index_instance.save_local(index_store_path)
             message = f"Document successfully added to index '{index_name}'."
         else:
             logger.info(f"Index '{index_name}' not found. Creating a new one.")
