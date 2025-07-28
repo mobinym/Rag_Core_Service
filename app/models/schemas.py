@@ -1,8 +1,10 @@
-# rag_core_service/app/models/schemas.py
+# app/models/schemas.py
 
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from app.core.config import settings
+
+
 class Chunk(BaseModel):
     chunk_content: str
     metadata: Dict[str, Any]
@@ -26,5 +28,15 @@ class AskResponse(BaseModel):
     answer: str
     source_documents: List[SourceDocument]
 
-class FormattedAskResponse(BaseModel):
-    formatted_answer: str
+
+class ReferenceChunk(BaseModel):
+    content: str
+    page: int
+
+class Reference(BaseModel):
+    doc_uuid: str
+    chunks: List[ReferenceChunk]
+
+class StructuredAskResponse(BaseModel):
+    answer: str
+    references: List[Reference]
