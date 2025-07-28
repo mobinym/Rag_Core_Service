@@ -6,7 +6,9 @@ from langchain_community.vectorstores import FAISS
 from langchain_chroma import Chroma
 from langchain_community.embeddings import FakeEmbeddings
 from .base import BaseVectorStoreStrategy
+import logging # ✅ ایمپورت کردن logging
 
+logger = logging.getLogger(__name__) 
 
 EMBEDDING_DIM = 1024
 
@@ -26,22 +28,25 @@ class FAISSStrategy(BaseVectorStoreStrategy):
             embedding=self.embeddings,
             metadatas=metadatas
         )
-        print("FAISS index created successfully in-memory.")
-    
+        # print("FAISS index created successfully in-memory.")
+        logger.info("FAISS index created successfully in-memory.")
+
     def save_local(self, path: str) -> None:
         if not self.vectorstore:
             raise RuntimeError("Cannot save an uninitialized vector store. Call create_index first.")
         
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.vectorstore.save_local(path)
-        print(f"FAISS index saved to: {path}")
+        # print(f"FAISS index saved to: {path}")
+        logger.info(f"FAISS index saved to: {path}") 
 
     def load_local(self, path: str) -> None:
         if not os.path.exists(path):
             raise FileNotFoundError(f"No FAISS index found at {path}")
             
         self.vectorstore = FAISS.load_local(path, self.embeddings, allow_dangerous_deserialization=True)
-        print(f"FAISS index loaded from: {path}")
+        # print(f"FAISS index loaded from: {path}")
+        logger.info(f"FAISS index loaded from: {path}") 
 
     def add_documents(self, texts: List[str], vectors: List[List[float]], metadatas: List[dict]):
         """اسناد جدید را به ایندکس FAISS موجود اضافه می‌کند."""
@@ -49,7 +54,7 @@ class FAISSStrategy(BaseVectorStoreStrategy):
             raise RuntimeError("Vector store is not loaded or created yet.")
         text_embedding_pairs = list(zip(texts, vectors))
         self.vectorstore.add_embeddings(text_embeddings=text_embedding_pairs, metadatas=metadatas)
-        print(f"Added {len(texts)} new documents to the existing FAISS index.")
+        # print(f"Added {len(texts)} new documents to the existing FAISS index.")
 
 class ChromaStrategy(BaseVectorStoreStrategy):
 
@@ -80,7 +85,8 @@ class ChromaStrategy(BaseVectorStoreStrategy):
             metadatas=metadatas,
             embeddings=vectors 
         )
-        print("Chroma index created successfully in-memory with COSINE distance.")
+        # print("Chroma index created successfully in-memory with COSINE distance.")
+        logger.info("Chroma index created successfully in-memory with COSINE distance.")
 
     def save_local(self, path: str) -> None:
         if self._temp_texts is None:
@@ -101,18 +107,20 @@ class ChromaStrategy(BaseVectorStoreStrategy):
         )
         
         self.vectorstore = persistent_chroma
-        print(f"ChromaDB created and persisted at: {path} with COSINE distance.")
+        # print(f"ChromaDB created and persisted at: {path} with COSINE distance.")
+        logger.info(f"ChromaDB created and persisted at: {path} with COSINE distance.") 
 
     def load_local(self, path: str) -> None:
         if not os.path.exists(path):
             raise FileNotFoundError(f"No ChromaDB found at {path}")
 
         self.vectorstore = Chroma(persist_directory=path, embedding_function=self.embeddings)
-        print(f"ChromaDB loaded from: {path}")
+        # print(f"ChromaDB loaded from: {path}")
+        logger.info(f"ChromaDB loaded from: {path}") 
 
     def add_documents(self, texts: List[str], vectors: List[List[float]], metadatas: List[dict]):
         """اسناد جدید را به ایندکس Chroma موجود اضافه می‌کند."""
         if not self.vectorstore:
             raise RuntimeError("Vector store is not loaded or created yet.")
         self.vectorstore.add_texts(texts=texts, metadatas=metadatas, embeddings=vectors)
-        print(f"Added {len(texts)} new documents to the existing Chroma index.")
+        # print(f"Added {len(texts)} new documents to the existing Chroma index.")
