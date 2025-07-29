@@ -29,30 +29,31 @@ class AdaptiveRetrieverSettings(BaseModel):
 class RetrieverSettings(BaseModel):
     adaptive: AdaptiveRetrieverSettings
 
-# مدل اصلی تنظیمات که تمام بخش‌ها را شامل می‌شود
+
+class PromptTemplates(BaseModel):
+    adaptive_retriever: str
+
+
 class Settings(BaseModel):
     paths: Paths
     services: Services
     llm: LLM
-    defaults: Defaults # ✅ اضافه کردن مدل پیش‌فرض‌ها
+    defaults: Defaults 
+    prompt_templates: PromptTemplates
+
     retriever_settings: RetrieverSettings
 
 
 def load_settings() -> Settings:
-    """
-    فایل config.yml را خوانده، اعتبارسنجی کرده و یک آبجکت Settings برمی‌گرداند.
-    """
-    # پیدا کردن مسیر فایل کانفیگ در ریشه پروژه
     config_path = Path(__file__).parent.parent.parent / "config.yml"
     
     if not config_path.exists():
         raise FileNotFoundError(f"Configuration file not found at: {config_path}")
         
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         config_data = yaml.safe_load(f)
     
-    # اعتبارسنجی و ساخت آبجکت تنظیمات با Pydantic
     return Settings(**config_data)
 
-# ساخت یک نمونه از تنظیمات برای استفاده در کل برنامه
+
 settings = load_settings()
