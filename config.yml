@@ -10,6 +10,7 @@ services:
   document_processor_url: "http://services.aiopt.io:7000/v1/chn/chunking/"
   embedding_service_url: "http://services.aiopt.io:5000/v1/emd/embed-text/"
   ollama_base_url: "http://services.aiopt.io:11434"
+  record_manager_db_url: "postgresql://postgres:mysecretpassword@localhost:5432/rag_db"
 
 defaults:
   extractor_strategy: "pdfFA"

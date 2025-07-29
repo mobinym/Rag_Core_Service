@@ -1,7 +1,7 @@
-# docker-compose.yml
 version: '3.8'
 
 services:
+  # Monitoring Services
   loki:
     image: grafana/loki:2.9.0
     container_name: loki
@@ -32,6 +32,24 @@ services:
       - loki
     networks:
       - monitoring
+  
+  # ✅ Added PostgreSQL Service
+  postgres:
+    image: postgres:15
+    container_name: postgres_db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=mysecretpassword
+      - POSTGRES_DB=rag_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - monitoring # ✅ Ensures Postgres is on the same network as other services
+
+volumes:
+  postgres_data:
 
 networks:
   monitoring:

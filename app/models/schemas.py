@@ -9,8 +9,10 @@ class Chunk(BaseModel):
     chunk_content: str
     metadata: Dict[str, Any]
 
+# app/models/schemas.py
 class CreateSessionResponse(BaseModel):
-    session_id: str
+    index_name: str # ✅ تغییر نام از session_id
+    doc_uuid: str   # ✅ افزودن شناسه سند
     message: str
     total_chunks: int
 

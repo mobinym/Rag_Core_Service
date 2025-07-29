@@ -18,6 +18,7 @@ class Services(BaseModel):
     document_processor_url: str
     embedding_service_url: str
     ollama_base_url: str
+    record_manager_db_url: str
 
 class LLM(BaseModel):
     model_name: str

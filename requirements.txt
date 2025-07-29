@@ -14,7 +14,7 @@ langchain-chroma
 faiss-cpu
 chromadb
 sentence-transformers
-
+psycopg2-binary
 # --- Monitoring & Logging ---
 # For Prometheus metrics endpoint
 prometheus-fastapi-instrumentator
@@ -23,3 +23,7 @@ prometheus-fastapi-instrumentator
 python-json-logger
 PyYAML
 python-multipart
+#-------------
+shutil
+gc 
+time 

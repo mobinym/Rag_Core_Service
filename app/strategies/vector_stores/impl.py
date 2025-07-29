@@ -55,6 +55,21 @@ class FAISSStrategy(BaseVectorStoreStrategy):
         text_embedding_pairs = list(zip(texts, vectors))
         self.vectorstore.add_embeddings(text_embeddings=text_embedding_pairs, metadatas=metadatas)
         # print(f"Added {len(texts)} new documents to the existing FAISS index.")
+    def delete(self, ids: List[str]) -> bool:
+        """
+        وکتورها را بر اساس شناسه‌های داخلی FAISS حذف می‌کند.
+        این متد توسط تابع index در LangChain استفاده می‌شود.
+        """
+        if not self.vectorstore:
+            return False
+        try:
+            # LangChain FAISS wrapper handles the string-to-int conversion for IDs
+            self.vectorstore.delete(ids)
+            logger.info(f"Successfully deleted {len(ids)} vectors from FAISS.")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete from FAISS: {e}")
+            return False
 
 class ChromaStrategy(BaseVectorStoreStrategy):
 
@@ -124,3 +139,15 @@ class ChromaStrategy(BaseVectorStoreStrategy):
             raise RuntimeError("Vector store is not loaded or created yet.")
         self.vectorstore.add_texts(texts=texts, metadatas=metadatas, embeddings=vectors)
         # print(f"Added {len(texts)} new documents to the existing Chroma index.")
+    def delete(self, doc_uuids: List[str]) -> bool:
+        """چانک‌ها را بر اساس لیستی از doc_uuid ها حذف می‌کند."""
+        if not self.vectorstore:
+            return False
+        try:
+            # Chroma می‌تواند مستقیماً بر اساس فراداده حذف کند
+            self.vectorstore.delete(where={"doc_uuid": {"$in": doc_uuids}})
+            logger.info(f"Successfully deleted chunks for doc_uuids: {doc_uuids}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete documents from Chroma: {e}")
+            return False
