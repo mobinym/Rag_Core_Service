@@ -151,3 +151,12 @@ class ChromaStrategy(BaseVectorStoreStrategy):
         except Exception as e:
             logger.error(f"Failed to delete documents from Chroma: {e}")
             return False
+    def close(self):
+        """به‌صورت ایمن اتصال به ChromaDB را می‌بندد (برای جلوگیری از خطای حذف فایل در ویندوز)."""
+        if self.vectorstore and hasattr(self.vectorstore, 'persist'):
+            try:
+                self.vectorstore.persist()  # اگر چیزی برای ذخیره باشه، ذخیره می‌کنه
+                self.vectorstore = None
+                logger.info("Chroma vectorstore safely closed.")
+            except Exception as e:
+                logger.warning(f"Failed to close Chroma vectorstore cleanly: {e}")

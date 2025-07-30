@@ -4,7 +4,7 @@ import logging
 import uuid
 import os
 import json
-from typing import Dict, Set
+from typing import Dict, Set, List
 from .monitoring import monitoring_logger
 import requests
 from fastapi import FastAPI, UploadFile, File, Form, Request, status
@@ -13,7 +13,10 @@ from fastapi.exceptions import RequestValidationError
 import time
 from .errors import ServiceException, ERROR_CODES
 from .core.config import settings
-from .models.schemas import CreateSessionResponse, AskRequest, AskResponse, StructuredAskResponse, Chunk 
+from .models.schemas import (
+    CreateSessionResponse, AskRequest, AskResponse, StructuredAskResponse, Chunk,
+    SessionInfoResponse, DocumentInfo, AddDocumentResponse, Reference
+)
 from .strategies.vector_stores.base import BaseVectorStoreStrategy
 from .strategies.vector_stores.impl import FAISSStrategy, ChromaStrategy
 from .strategies.retrievers.base import BaseRetrieverStrategy
@@ -27,7 +30,7 @@ import shutil
 from langchain_community.vectorstores import FAISS
 import gc
 import time 
-
+from datetime import datetime, timezone
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -58,26 +61,51 @@ async def generic_exception_handler(request: Request, exc: Exception):
     logger.error(f"An unexpected error occurred: {exc}", exc_info=True)
     return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"success": False, "error": {"code": 99999, "message": ERROR_CODES[99999]}})
 
+def _process_and_embed_file(file: UploadFile, extractor: str, chunker: str, doc_uuid: str) -> (List[str], List[dict], List[List[float]]):
+    """فایل را از طریق سرویس‌های خارجی پردازش و امبد می‌کند."""
+    try:
+        files = {'file': (file.filename, file.file, file.content_type)}
+        params = {'extractor_strategy': extractor, 'chunker_strategy': chunker}
+        doc_response = requests.post(settings.services.document_processor_url, files=files, data=params, timeout=300)
+        doc_response.raise_for_status()
+        
+        chunks = [Chunk(**chunk_data) for chunk_data in doc_response.json()['chunks']]
+        for chunk in chunks:
+            chunk.metadata['doc_uuid'] = doc_uuid
 
-def structure_final_response(raw_response: AskResponse) -> StructuredAskResponse:
+        texts = [c.chunk_content for c in chunks]
+        metadatas = [c.metadata for c in chunks]
+
+        embed_response = requests.post(settings.services.embedding_service_url, json={"texts": texts}, timeout=180)
+        embed_response.raise_for_status()
+        vectors = embed_response.json()["vectors"]
+        
+        if not vectors:
+            raise ServiceException(status_code=400, error_code=30003, message=ERROR_CODES[30003])
+            
+        return texts, metadatas, vectors
+    except requests.RequestException as e:
+        raise ServiceException(status_code=503, error_code=40001, message=f"یک سرویس خارجی در دسترس نیست: {e}")
+    
+
+def structure_final_response(raw_response: AskResponse, session_info: dict) -> StructuredAskResponse:
+    """پاسخ خام RAG را به یک ساختار JSON تمیز تبدیل می‌کند."""
     answer = raw_response.answer
+    
+    doc_map = {doc['doc_uuid']: doc['filename'] for doc in session_info.get('documents', [])}
     
     grouped_chunks = defaultdict(list)
     for doc in raw_response.source_documents:
         metadata = doc.metadata
         doc_uuid = metadata.get("doc_uuid", "unknown_document")
-        
-        ref_chunk = {
-            "content": doc.page_content,
-            "page": metadata.get("page", 0)
-        }
+        ref_chunk = {"content": doc.page_content, "page": metadata.get("page", 0)}
         grouped_chunks[doc_uuid].append(ref_chunk)
         
-   
     references = []
     for doc_uuid, chunks in grouped_chunks.items():
         references.append({
             "doc_uuid": doc_uuid,
+            "filename": doc_map.get(doc_uuid, "نام فایل نامشخص"),
             "chunks": chunks
         })
         
@@ -90,290 +118,299 @@ INDEX_CACHE: Dict[str, BaseVectorStoreStrategy] = {}
 llm = OllamaLLM(model=settings.llm.model_name, base_url=settings.services.ollama_base_url)
 
 
+
 # --- API Endpoints ---
-@app.post("/indexes/{index_name}/add", response_model=CreateSessionResponse, tags=["Indexes"])
-def add_to_index(
-    index_name: str,
+
+@app.post("/sessions", response_model=CreateSessionResponse, tags=["Sessions"])
+def create_session(
     file: UploadFile = File(...),
     vector_store_strategy: str = Form("faiss", enum=["faiss", "chroma"]),
     extractor_strategy: str = Form(settings.defaults.extractor_strategy),
     chunker_strategy: str = Form(settings.defaults.chunker_strategy)
 ):
-    """یک سند را به ایندکس اضافه کرده و نگاشت شناسه به نام فایل را به‌روز می‌کند."""
-    logger.info(f"Request to add document '{file.filename}' to index '{index_name}'...")
-    try:
-        # --- بخش پردازش و امبدینگ (بدون تغییر) ---
-        files = {'file': (file.filename, file.file, file.content_type)}
-        params = {'extractor_strategy': extractor_strategy, 'chunker_strategy': chunker_strategy}
-        doc_response = requests.post(settings.services.document_processor_url, files=files, data=params, timeout=300)
-        doc_response.raise_for_status()
-        response_data = doc_response.json()
-        chunks = [Chunk(**chunk_data) for chunk_data in response_data['chunks']]
-        document_uuid = str(uuid.uuid4())
-        for chunk in chunks:
-            chunk.metadata['doc_uuid'] = document_uuid
-        chunk_texts = [c.chunk_content for c in chunks]
-        chunk_metadatas = [c.metadata for c in chunks]
-        embed_response = requests.post(settings.services.embedding_service_url, json={"texts": chunk_texts}, timeout=180)
-        embed_response.raise_for_status()
-        vectors = embed_response.json()["vectors"]
-    except requests.RequestException as e:
-        raise ServiceException(status_code=503, error_code=40001, message=f"An external service is unavailable: {e}")
-    if not vectors:
-        raise ServiceException(status_code=400, error_code=30003, message=ERROR_CODES[30003])
+    """یک جلسه جدید با اولین سند ایجاد می‌کند."""
+    session_id = str(uuid.uuid4())
+    doc_uuid = str(uuid.uuid4())
+    logger.info(f"درخواست برای ایجاد جلسه جدید '{session_id}' با سند '{file.filename}'...")
+
+    texts, metadatas, vectors = _process_and_embed_file(file, extractor_strategy, chunker_strategy, doc_uuid)
 
     try:
-        # --- بخش مدیریت ایندکس و فایل نگاشت ---
-        index_dir = os.path.join(settings.paths.index_dir, index_name)
-        config_path = os.path.join(index_dir, "index_config.json")
-        index_store_path = os.path.join(index_dir, "index")
+        session_dir = os.path.join(settings.paths.index_dir, session_id)
+        os.makedirs(session_dir, exist_ok=True)
         
-        # ✅ ۱. مسیر فایل نگاشت را تعریف کرده و یک دیکشنری خالی برای آن می‌سازیم
-        uuid_map_path = os.path.join(index_dir, "uuid_map.json")
-        uuid_map = {}
+        strategy_class = VECTOR_STORE_FACTORY[vector_store_strategy]
+        index_instance = strategy_class()
+        index_instance.create_index(texts=texts, vectors=vectors, metadatas=metadatas)
+        index_instance.save_local(os.path.join(session_dir, "index"))
 
-        if os.path.exists(index_dir):
-            logger.info(f"Index '{index_name}' exists. Adding new documents.")
+        session_info = {
+            "session_id": session_id,
+            "vector_store_strategy": vector_store_strategy,
+            "documents": [{
+                "doc_uuid": doc_uuid,
+                "filename": file.filename,
+                "added_at": datetime.now(timezone.utc).isoformat()
+            }]
+        }
+        with open(os.path.join(session_dir, "session_info.json"), 'w', encoding='utf-8') as f:
+            json.dump(session_info, f, indent=4)
+
+        INDEX_CACHE[session_id] = index_instance
+        return CreateSessionResponse(session_id=session_id, doc_uuid=doc_uuid, message="جلسه جدید با موفقیت ایجاد شد.")
+    except Exception as e:
+        logger.error(f"خطا در ایجاد جلسه '{session_id}': {e}", exc_info=True)
+        raise ServiceException(status_code=500, error_code=40002, message=f"خطا در ایجاد جلسه: {e}")
+
+@app.post("/sessions/{session_id}/documents", response_model=AddDocumentResponse, tags=["Sessions"])
+def add_document_to_session(session_id: str, file: UploadFile = File(...)):
+    """یک سند جدید را به یک جلسه موجود اضافه می‌کند."""
+    logger.info(f"درخواست برای افزودن سند '{file.filename}' به جلسه '{session_id}'...")
+    session_dir = os.path.join(settings.paths.index_dir, session_id)
+    info_path = os.path.join(session_dir, "session_info.json")
+    if not os.path.exists(info_path):
+        raise ServiceException(status_code=404, error_code=30002, message="جلسه یافت نشد.")
+
+    with open(info_path, 'r', encoding='utf-8') as f:
+        session_info = json.load(f)
+    
+    doc_uuid = str(uuid.uuid4())
+    texts, metadatas, vectors = _process_and_embed_file(file, settings.defaults.extractor_strategy, settings.defaults.chunker_strategy, doc_uuid)
+    
+    strategy_class = VECTOR_STORE_FACTORY[session_info["vector_store_strategy"]]
+    index_instance = strategy_class()
+    index_instance.load_local(os.path.join(session_dir, "index"))
+    index_instance.add_documents(texts=texts, vectors=vectors, metadatas=metadatas)
+    
+    if isinstance(index_instance.vectorstore, FAISS):
+        index_instance.save_local(os.path.join(session_dir, "index"))
+        
+    session_info["documents"].append({
+        "doc_uuid": doc_uuid,
+        "filename": file.filename,
+        "added_at": datetime.now(timezone.utc).isoformat()
+    })
+    with open(info_path, 'w', encoding='utf-8') as f:
+        json.dump(session_info, f, indent=4)
+        
+    INDEX_CACHE[session_id] = index_instance
+    return AddDocumentResponse(session_id=session_id, doc_uuid=doc_uuid, message="سند با موفقیت اضافه شد.")
+
+@app.get("/sessions/{session_id}", response_model=SessionInfoResponse, tags=["Sessions"])
+def get_session_info(session_id: str):
+    """اطلاعات کامل یک جلسه و اسناد آن را برمی‌گرداند."""
+    session_dir = os.path.join(settings.paths.index_dir, session_id)
+    info_path = os.path.join(session_dir, "session_info.json")
+    if not os.path.exists(info_path):
+        raise ServiceException(status_code=404, error_code=30002, message="جلسه یافت نشد.")
+    
+    with open(info_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+@app.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Sessions"])
+def delete_session(session_id: str):
+    """یک جلسه و تمام داده‌های مرتبط با آن را حذف می‌کند."""
+    logger.info(f"درخواست برای حذف جلسه '{session_id}'...")
+    session_dir = os.path.join(settings.paths.index_dir, session_id)
+    if not os.path.exists(session_dir):
+        raise ServiceException(status_code=404, error_code=30002, message="جلسه یافت نشد.")
+
+    if session_id in INDEX_CACHE:
+        del INDEX_CACHE[session_id]
+        gc.collect()
+
+    try:
+        shutil.rmtree(session_dir)
+        logger.info(f"پوشه جلسه با موفقیت حذف شد: {session_dir}")
+    except OSError as e:
+        logger.error(f"خطا در حذف پوشه جلسه {session_dir}: {e}", exc_info=True)
+        raise ServiceException(status_code=500, error_code=99999, message=f"خطا در حذف فایل‌های جلسه: {e}")
+    return
+
+@app.post("/sessions/{session_id}/ask", response_model=StructuredAskResponse, tags=["Sessions"])
+def ask_from_session(session_id: str, request: AskRequest):
+    """از یک جلسه مشخص سوال می‌پرسد."""
+    start_time = time.time()
+    
+    session_dir = os.path.join(settings.paths.index_dir, session_id)
+    info_path = os.path.join(session_dir, "session_info.json")
+    
+    index_instance = INDEX_CACHE.get(session_id)
+    if not index_instance:
+        logger.info(f"ایندکس در کش نیست. در حال بارگذاری از دیسک برای جلسه: {session_id}")
+        try:
+            with open(info_path, 'r', encoding='utf-8') as f:
+                session_info = json.load(f)
+            strategy_class = VECTOR_STORE_FACTORY[session_info["vector_store_strategy"]]
+            index_instance = strategy_class()
+            index_instance.load_local(os.path.join(session_dir, "index"))
+            INDEX_CACHE[session_id] = index_instance
+        except FileNotFoundError:
+            raise ServiceException(status_code=404, error_code=30002, message="جلسه یافت نشد.")
+        except Exception as e:
+            raise ServiceException(status_code=500, error_code=40003, message=f"خطا در بارگذاری ایندکس جلسه: {e}")
+    
+    retriever = RETRIEVERS.get(request.retrieval_strategy)
+    try:
+        raw_response: AskResponse = retriever.retrieve(query=request.query, vector_store=index_instance.vectorstore, llm=llm, top_k=request.top_k)
+        
+        with open(info_path, 'r', encoding='utf-8') as f:
+            session_info = json.load(f)
             
-            # ✅ ۲. اگر ایندکس وجود داشت، فایل نگاشت قبلی را می‌خوانیم
-            if os.path.exists(uuid_map_path):
-                with open(uuid_map_path, 'r', encoding='utf-8') as f:
-                    uuid_map = json.load(f)
-
-            with open(config_path, 'r', encoding='utf-8') as f: config = json.load(f)
-            strategy_class = VECTOR_STORE_FACTORY[config["vector_store_strategy"]]
-            index_instance = strategy_class()
-            index_instance.load_local(index_store_path)
-            index_instance.add_documents(texts=chunk_texts, vectors=vectors, metadatas=chunk_metadatas)
-            if isinstance(index_instance.vectorstore, FAISS):
-                index_instance.save_local(index_store_path)
-            message = f"Document successfully added to index '{index_name}'."
-        else:
-            logger.info(f"Index '{index_name}' not found. Creating a new one.")
-            os.makedirs(index_dir, exist_ok=True)
-            strategy_class = VECTOR_STORE_FACTORY[vector_store_strategy]
-            index_instance = strategy_class()
-            index_instance.create_index(texts=chunk_texts, vectors=vectors, metadatas=chunk_metadatas)
-            index_instance.save_local(index_store_path)
-            with open(config_path, 'w', encoding='utf-8') as f: json.dump({"vector_store_strategy": vector_store_strategy}, f)
-            message = f"New index '{index_name}' created successfully."
-
-        # ✅ ۳. اطلاعات سند جدید را به دیکشنری نگاشت اضافه می‌کنیم
-        uuid_map[document_uuid] = file.filename
-
-        # ✅ ۴. دیکشنری به‌روز شده را در فایل uuid_map.json ذخیره می‌کنیم
-        with open(uuid_map_path, 'w', encoding='utf-8') as f:
-            json.dump(uuid_map, f, indent=4, ensure_ascii=False)
+        structured_response = structure_final_response(raw_response, session_info)
         
-        logger.info(f"Updated UUID map for index '{index_name}'.")
+        monitoring_data = {
+            "session_id": session_id, "query": request.query, "retrieval_strategy": request.retrieval_strategy,
+            "response_time_seconds": round(time.time() - start_time, 2),
+            "llm_answer": raw_response.answer, "structured_response": structured_response.model_dump()
+        }
+        monitoring_logger.info("RAG Request Processed", extra=monitoring_data)
 
-        INDEX_CACHE[index_name] = index_instance
-        return CreateSessionResponse(index_name=index_name, doc_uuid=document_uuid, message=message, total_chunks=len(vectors))
+        return structured_response
         
     except Exception as e:
-        logger.error(f"Failed during index operation for '{index_name}': {e}", exc_info=True)
-        raise ServiceException(status_code=500, error_code=40002, message=f"Failed to create or update index '{index_name}': {e}")
+        logger.error(f"Error during retrieval for session '{session_id}': {e}", exc_info=True)
+        monitoring_logger.error("RAG Request Failed", extra={"session_id": session_id, "query": request.query, "error": str(e)})
+        raise ServiceException(status_code=500, error_code=40004, message=f"خطا در زمان بازیابی/تولید پاسخ: {e}")
 
-# app/main.py
-
-@app.put("/indexes/{index_name}/documents", tags=["Indexes"])
-def update_document(
-    index_name: str,
-    doc_uuid_to_replace: str = Form(...),
-    file: UploadFile = File(...)
-):
+@app.delete("/sessions/{session_id}/documents/{doc_uuid}", tags=["Sessions"])
+def delete_document_from_session(session_id: str, doc_uuid: str):
     """
-    یک سند را در ایندکس با جایگزین کردن آن به‌روزرسانی کرده و نام فایل را نیز آپدیت می‌کند.
+    یک سند مشخص را بر اساس شناسه آن (doc_uuid) از یک جلسه حذف می‌کند.
     """
-    logger.info(f"Request to update document '{doc_uuid_to_replace}' in index '{index_name}' with new file '{file.filename}'...")
+    logger.info(f"Request to delete document '{doc_uuid}' from session '{session_id}'...")
     
-    index_dir = os.path.join(settings.paths.index_dir, index_name)
-    config_path = os.path.join(index_dir, "index_config.json")
-    index_store_path = os.path.join(index_dir, "index")
-    uuid_map_path = os.path.join(index_dir, "uuid_map.json")
+    session_dir = os.path.join(settings.paths.index_dir, session_id)
+    info_path = os.path.join(session_dir, "session_info.json")
+    index_store_path = os.path.join(session_dir, "index")
 
-    if not os.path.exists(index_dir):
-        raise ServiceException(status_code=404, error_code=30002, message=f"Index '{index_name}' not found.")
+    if not os.path.exists(info_path):
+        raise ServiceException(status_code=404, error_code=30002, message="Session not found.")
 
-    # ۱. خواندن تنظیمات و فایل نگاشت
-    with open(config_path, 'r', encoding='utf-8') as f: config = json.load(f)
-    strategy_name = config["vector_store_strategy"]
+    with open(info_path, 'r', encoding='utf-8') as f:
+        session_info = json.load(f)
     
-    uuid_map = {}
-    if os.path.exists(uuid_map_path):
-        with open(uuid_map_path, 'r', encoding='utf-8') as f:
-            uuid_map = json.load(f)
-    
-    if doc_uuid_to_replace not in uuid_map:
-        raise ServiceException(status_code=404, error_code=30002, message=f"Document UUID '{doc_uuid_to_replace}' not found in index '{index_name}'.")
+    # بررسی وجود سند در اطلاعات جلسه
+    doc_to_delete = next((doc for doc in session_info["documents"] if doc["doc_uuid"] == doc_uuid), None)
+    if not doc_to_delete:
+        raise ServiceException(status_code=404, error_code=30002, message=f"Document UUID '{doc_uuid}' not found in session.")
 
-    # ✅ --- شروع بخش کلیدی ---
-    # ۲. پردازش و امبدینگ فایل جدید (این بخش اضافه شده است)
-    try:
-        logger.info(f"Processing new file '{file.filename}'...")
-        files = {'file': (file.filename, file.file, file.content_type)}
-        params = {'extractor_strategy': settings.defaults.extractor_strategy, 'chunker_strategy': settings.defaults.chunker_strategy}
-        
-        doc_response = requests.post(settings.services.document_processor_url, files=files, data=params, timeout=300)
-        doc_response.raise_for_status()
-        response_data = doc_response.json()
-        chunks = [Chunk(**chunk_data) for chunk_data in response_data['chunks']]
-        
-        # شناسه سند قدیمی را به چانک‌های جدید اختصاص می‌دهیم
-        for chunk in chunks:
-            chunk.metadata['doc_uuid'] = doc_uuid_to_replace
-            
-        chunk_texts = [c.chunk_content for c in chunks]
-        chunk_metadatas = [c.metadata for c in chunks]
-
-        embed_response = requests.post(settings.services.embedding_service_url, json={"texts": chunk_texts}, timeout=180)
-        embed_response.raise_for_status()
-        vectors = embed_response.json()["vectors"]
-        logger.info(f"New file processed into {len(vectors)} chunks.")
-    except requests.RequestException as e:
-        raise ServiceException(status_code=503, error_code=40001, message=f"An external service is unavailable during update: {e}")
-    # ✅ --- پایان بخش کلیدی ---
-
-    # ۳. بارگذاری ایندکس و اجرای منطق به‌روزرسانی
+    strategy_name = session_info["vector_store_strategy"]
     strategy_class = VECTOR_STORE_FACTORY[strategy_name]
     index_instance = strategy_class()
     index_instance.load_local(index_store_path)
 
+    # اجرای منطق حذف بر اساس نوع ایندکس
+    if strategy_name == 'chroma':
+        index_instance.delete([doc_uuid])
+    elif strategy_name == 'faiss':
+        # برای FAISS، از روش بازسازی ایندکس استفاده می‌کنیم
+        vector_store = index_instance.vectorstore
+        retained_texts, retained_vectors, retained_metadatas = [], [], []
+        for i in range(vector_store.index.ntotal):
+            doc = vector_store.docstore.search(vector_store.index_to_docstore_id[i])
+            if doc.metadata.get("doc_uuid") != doc_uuid:
+                retained_texts.append(doc.page_content)
+                retained_vectors.append(vector_store.index.reconstruct(i).tolist())
+                retained_metadatas.append(doc.metadata)
+        
+        if not retained_texts:
+            # اگر هیچ سندی باقی نماند، کل جلسه را حذف می‌کنیم
+            shutil.rmtree(session_dir)
+            if session_id in INDEX_CACHE: del INDEX_CACHE[session_id]
+            return {"message": "Session was empty after deletion and has been removed."}
+        
+        new_strategy = FAISSStrategy()
+        new_strategy.create_index(texts=retained_texts, vectors=retained_vectors, metadatas=retained_metadatas)
+        new_strategy.save_local(index_store_path)
+        index_instance = new_strategy
+
+    # به‌روزرسانی فایل اطلاعات جلسه
+    session_info["documents"] = [doc for doc in session_info["documents"] if doc["doc_uuid"] != doc_uuid]
+    with open(info_path, 'w', encoding='utf-8') as f:
+        json.dump(session_info, f, indent=4)
+    
+    INDEX_CACHE[session_id] = index_instance
+    return {"message": f"Document '{doc_uuid}' was successfully deleted from session '{session_id}'."}
+
+# app/main.py
+
+@app.put("/sessions/{session_id}/documents/{doc_uuid}", tags=["Sessions"])
+def update_document_in_session(
+    session_id: str,
+    doc_uuid: str,
+    file: UploadFile = File(...)
+):
+    """
+    Atomically updates a document within a session by replacing it with a new file.
+    It deletes all old chunks and adds the new ones.
+    """
+    logger.info(f"Request to update document '{doc_uuid}' in session '{session_id}' with new file '{file.filename}'...")
+    
+    session_dir = os.path.join(settings.paths.index_dir, session_id)
+    info_path = os.path.join(session_dir, "session_info.json")
+    index_store_path = os.path.join(session_dir, "index")
+
+    if not os.path.exists(info_path):
+        raise ServiceException(status_code=404, error_code=30002, message="Session not found.")
+
+    with open(info_path, 'r', encoding='utf-8') as f:
+        session_info = json.load(f)
+    
+    doc_to_update = next((doc for doc in session_info["documents"] if doc["doc_uuid"] == doc_uuid), None)
+    if not doc_to_update:
+        raise ServiceException(status_code=404, error_code=30002, message=f"Document UUID '{doc_uuid}' not found in session.")
+
+    # 1. Process and embed the NEW file
+    new_texts, new_metadatas, new_vectors = _process_and_embed_file(
+        file, settings.defaults.extractor_strategy, settings.defaults.chunker_strategy, doc_uuid
+    )
+    
+    # 2. Load the index
+    strategy_name = session_info["vector_store_strategy"]
+    strategy_class = VECTOR_STORE_FACTORY[strategy_name]
+    index_instance = strategy_class()
+    index_instance.load_local(index_store_path)
+
+    # 3. Execute the update logic based on the strategy
     if strategy_name == 'chroma':
         logger.info("Executing Chroma update strategy (delete and re-add)...")
-        index_instance.delete([doc_uuid_to_replace])
-        index_instance.add_documents(texts=chunk_texts, vectors=vectors, metadatas=chunk_metadatas)
+        index_instance.delete([doc_uuid])
+        index_instance.add_documents(texts=new_texts, vectors=new_vectors, metadatas=new_metadatas)
     
     elif strategy_name == 'faiss':
         logger.info("Executing FAISS update strategy (rebuild)...")
         vector_store = index_instance.vectorstore
-        total_docs = vector_store.index.ntotal
-        all_ids = list(range(total_docs))
         
-        retained_texts, retained_embeddings, retained_metadatas = [], [], []
+        retained_texts, retained_vectors, retained_metadatas = [], [], []
         
-        for i in all_ids:
+        for i in range(vector_store.index.ntotal):
             doc = vector_store.docstore.search(vector_store.index_to_docstore_id[i])
-            if doc.metadata.get("doc_uuid") != doc_uuid_to_replace:
+            if doc.metadata.get("doc_uuid") != doc_uuid:
                 retained_texts.append(doc.page_content)
-                retained_embeddings.append(vector_store.index.reconstruct(i).tolist())
+                retained_vectors.append(vector_store.index.reconstruct(i).tolist())
                 retained_metadatas.append(doc.metadata)
 
-        final_texts = retained_texts + chunk_texts
-        final_vectors = retained_embeddings + vectors
-        final_metadatas = retained_metadatas + chunk_metadatas
+        final_texts = retained_texts + new_texts
+        final_vectors = retained_vectors + new_vectors
+        final_metadatas = retained_metadatas + new_metadatas
 
         new_strategy = FAISSStrategy()
         new_strategy.create_index(texts=final_texts, vectors=final_vectors, metadatas=final_metadatas)
         new_strategy.save_local(index_store_path)
         index_instance = new_strategy
 
-    # ۴. به‌روزرسانی نام فایل در فایل نگاشت
-    uuid_map[doc_uuid_to_replace] = file.filename
-    with open(uuid_map_path, 'w', encoding='utf-8') as f:
-        json.dump(uuid_map, f, indent=4, ensure_ascii=False)
-    
-    logger.info(f"Updated UUID map with new filename: {file.filename}")
-
-    # ۵. به‌روزرسانی کش حافظه
-    INDEX_CACHE[index_name] = index_instance
-
-    return {"message": f"Document '{doc_uuid_to_replace}' was successfully updated in index '{index_name}' with file '{file.filename}'."}
-@app.delete("/indexes/{index_name}", status_code=status.HTTP_204_NO_CONTENT, tags=["Indexes"])
-def delete_index(index_name: str):
-    logger.info(f"Request to delete index '{index_name}'...")
-    index_dir = os.path.join(settings.paths.index_dir, index_name)
-    if not os.path.exists(index_dir):
-        raise ServiceException(status_code=404, error_code=30002, message=f"Index '{index_name}' not found.")
-    if index_name in INDEX_CACHE:
-        # با None کردن، به پایتون کمک می‌کنیم سریع‌تر منبع را آزاد کند
-        INDEX_CACHE[index_name] = None 
-        del INDEX_CACHE[index_name]
-        logger.info(f"Removed '{index_name}' from in-memory cache.")
-        gc.collect()
-    max_retries = 5
-    retry_delay = 0.5 
-    for attempt in range(max_retries):
-        try:
-            shutil.rmtree(index_dir)
-            logger.info(f"Successfully deleted index directory: {index_dir}")
-            return  # Exit the function on success
-        except OSError as e:
-            # Check if the error is the specific file lock error
-            if e.winerror == 32 and attempt < max_retries - 1:
-                logger.warning(f"Attempt {attempt + 1}: Could not delete index '{index_name}' due to a file lock. Retrying in {retry_delay}s...")
-                time.sleep(retry_delay)
-            else:
-                # If it's another error or the last attempt, raise it
-                logger.error(f"Error deleting index directory {index_dir}: {e}", exc_info=True)
-                raise ServiceException(status_code=500, error_code=99999, message=f"Failed to delete index files: {e}")
-    return
-
-
-
-
-@app.get("/indexes/{index_name}/documents", tags=["Indexes"])
-def get_documents_in_index(index_name: str):
-    """
-    لیست تمام اسناد (نگاشت بین شناسه و نام فایل) را برای یک ایندکس برمی‌گرداند.
-    """
-    index_dir = os.path.join(settings.paths.index_dir, index_name)
-    uuid_map_path = os.path.join(index_dir, "uuid_map.json")
-
-    if not os.path.exists(uuid_map_path):
-        raise ServiceException(status_code=404, error_code=30002, message=f"Index '{index_name}' or its document map not found.")
-
-    with open(uuid_map_path, 'r', encoding='utf-8') as f:
-        uuid_map = json.load(f)
-    
-    return uuid_map
-
-
-@app.post("/indexes/{index_name}/ask", response_model=StructuredAskResponse, tags=["Indexes"])
-def ask_from_index(index_name: str, request: AskRequest):
-    """Asks a question from a named index."""
-    logger.info(f"API request for index '{index_name}' with strategy '{request.retrieval_strategy}'")
-    start_time = time.time()
-    
-    index_instance = INDEX_CACHE.get(index_name)
-    if not index_instance:
-        logger.info(f"Index not in cache. Loading from disk for index: {index_name}")
-        try:
-            index_dir = os.path.join(settings.paths.index_dir, index_name)
-            config_path = os.path.join(index_dir, "index_config.json")
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            strategy_class = VECTOR_STORE_FACTORY[config["vector_store_strategy"]]
-            index_instance = strategy_class()
-            index_instance.load_local(os.path.join(index_dir, "index"))
-            INDEX_CACHE[index_name] = index_instance
-        except FileNotFoundError:
-            raise ServiceException(status_code=404, error_code=30002, message=f"Index '{index_name}' not found on disk.")
-        except Exception as e:
-            raise ServiceException(status_code=500, error_code=40003, message=f"Failed to load index '{index_name}': {e}")
+    # 4. Update the session_info.json file with the new filename
+    for doc in session_info["documents"]:
+        if doc["doc_uuid"] == doc_uuid:
+            doc["filename"] = file.filename
+            doc["added_at"] = datetime.now(timezone.utc).isoformat()
+            break
             
-    retriever = RETRIEVERS.get(request.retrieval_strategy)
-    try:
-        raw_response: AskResponse = retriever.retrieve(query=request.query, vector_store=index_instance.vectorstore, llm=llm, top_k=request.top_k)
-        end_time = time.time()
-        
-        monitoring_data = {
-            "session_id": index_name,
-            "query": request.query,
-            "retrieval_strategy": request.retrieval_strategy,
-            "top_k": request.top_k,
-            "llm_answer": raw_response.answer,
-            "structured_response ": structure_final_response(raw_response),
-            "retrieved_sources_count": len(raw_response.source_documents),
-            "source_pages": sorted(list({doc.metadata.get("page") for doc in raw_response.source_documents if doc.metadata.get("page") is not None})),
-            "response_time_seconds": round(end_time - start_time, 2),
-        }
-        monitoring_logger.info("RAG Request Processed", extra=monitoring_data)
-        
-        structured_response = structure_final_response(raw_response)
-        return structured_response
-        
-    except Exception as e:
-        logger.error(f"Error during retrieval for index '{index_name}': {e}", exc_info=True)
-        monitoring_logger.error("RAG Request Failed", extra={"session_id": index_name, "query": request.query, "error": str(e)})
-        raise ServiceException(status_code=500, error_code=40004, message=f"An error occurred during retrieval/generation: {e}")
+    with open(info_path, 'w', encoding='utf-8') as f:
+        json.dump(session_info, f, indent=4)
+    
+    # 5. Update the in-memory cache
+    INDEX_CACHE[session_id] = index_instance
+
+    return {"message": f"Document '{doc_uuid}' was successfully updated with file '{file.filename}'."}

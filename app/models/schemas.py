@@ -4,17 +4,10 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 from app.core.config import settings
 
-
+# --- مدل‌های ورودی و داخلی ---
 class Chunk(BaseModel):
     chunk_content: str
     metadata: Dict[str, Any]
-
-# app/models/schemas.py
-class CreateSessionResponse(BaseModel):
-    index_name: str # ✅ تغییر نام از session_id
-    doc_uuid: str   # ✅ افزودن شناسه سند
-    message: str
-    total_chunks: int
 
 class AskRequest(BaseModel):
     query: str
@@ -30,6 +23,26 @@ class AskResponse(BaseModel):
     answer: str
     source_documents: List[SourceDocument]
 
+# --- مدل‌های خروجی نهایی ---
+class DocumentInfo(BaseModel):
+    doc_uuid: str
+    filename: str
+    added_at: str
+
+class CreateSessionResponse(BaseModel):
+    session_id: str
+    doc_uuid: str
+    message: str
+
+class AddDocumentResponse(BaseModel):
+    session_id: str
+    doc_uuid: str
+    message: str
+
+class SessionInfoResponse(BaseModel):
+    session_id: str
+    vector_store_strategy: str
+    documents: List[DocumentInfo]
 
 class ReferenceChunk(BaseModel):
     content: str
@@ -37,6 +50,7 @@ class ReferenceChunk(BaseModel):
 
 class Reference(BaseModel):
     doc_uuid: str
+    filename: str
     chunks: List[ReferenceChunk]
 
 class StructuredAskResponse(BaseModel):
