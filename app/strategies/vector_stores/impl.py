@@ -7,6 +7,9 @@ from langchain_chroma import Chroma
 from langchain_community.embeddings import FakeEmbeddings
 from .base import BaseVectorStoreStrategy
 import logging # ✅ ایمپورت کردن logging
+from langchain_community.docstore.in_memory import InMemoryDocstore
+import numpy as np # ایمپورت جدید
+import faiss # ایمپورت جدید
 
 logger = logging.getLogger(__name__) 
 
@@ -70,6 +73,22 @@ class FAISSStrategy(BaseVectorStoreStrategy):
         except Exception as e:
             logger.error(f"Failed to delete from FAISS: {e}")
             return False
+    def create_and_save_empty(self, path: str, metadatas: dict = None) -> None:
+        """یک ایندکس خالی FAISS ساخته و ذخیره می‌کند."""
+        # ما باید یک ایندکس با ابعاد صحیح اما بدون داده بسازیم
+        empty_index = faiss.IndexFlatL2(EMBEDDING_DIM)
+        empty_docstore = InMemoryDocstore({})
+        empty_index_to_docstore_id = {}
+        
+        # ساخت آبجکت LangChain FAISS از اجزای خالی
+        self.vectorstore = FAISS(
+            embedding_function=self.embeddings,
+            index=empty_index,
+            docstore=empty_docstore,
+            index_to_docstore_id=empty_index_to_docstore_id
+        )
+        self.save_local(path)
+        logger.info(f"ایندکس خالی FAISS در مسیر زیر ساخته و ذخیره شد: {path}")
 
 class ChromaStrategy(BaseVectorStoreStrategy):
 
@@ -160,3 +179,13 @@ class ChromaStrategy(BaseVectorStoreStrategy):
                 logger.info("Chroma vectorstore safely closed.")
             except Exception as e:
                 logger.warning(f"Failed to close Chroma vectorstore cleanly: {e}")
+
+    def create_and_save_empty(self, path: str, metadatas: dict = None) -> None:
+        """یک ایندکس خالی ChromaDB ساخته و ذخیره می‌کند."""
+        # برای Chroma، ساخت یک ایندکس خالی به سادگی مقداردهی اولیه با یک مسیر است
+        self.vectorstore = Chroma(
+            persist_directory=path,
+            embedding_function=self.embeddings,
+            collection_metadata=metadatas
+        )
+        logger.info(f"ایندکس خالی ChromaDB در مسیر زیر ساخته و ذخیره شد: {path}")

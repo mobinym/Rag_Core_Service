@@ -21,3 +21,8 @@ class BaseVectorStoreStrategy(ABC):
     @abstractmethod
     def load_local(self, path: str) -> None:
         pass
+    
+    @abstractmethod
+    def create_and_save_empty(self, path: str, metadatas: dict = None) -> None:
+        """یک ایندکس خالی ساخته و آن را در مسیر مشخص شده ذخیره می‌کند."""
+        pass

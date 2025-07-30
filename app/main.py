@@ -120,64 +120,129 @@ llm = OllamaLLM(model=settings.llm.model_name, base_url=settings.services.ollama
 
 
 # --- API Endpoints ---
+@app.post("/v1/rag/sessions/empty", response_model=CreateSessionResponse, tags=["Sessions"])
+def create_empty_session(
+    vector_store_strategy: str = Form("faiss", enum=["faiss", "chroma"])
+):
+    """یک جلسه جدید و خالی ایجاد کرده و شناسه آن را برمی‌گرداند."""
+    session_id = str(uuid.uuid4())
+    logger.info(f"درخواست برای ایجاد جلسه خالی جدید '{session_id}' با استراتژی '{vector_store_strategy}'...")
+
+    try:
+        session_dir = os.path.join(settings.paths.index_dir, session_id)
+        os.makedirs(session_dir, exist_ok=True)
+        
+        strategy_class = VECTOR_STORE_FACTORY[vector_store_strategy]
+        index_instance = strategy_class()
+
+        # برای Chroma، متریک فاصله را تنظیم می‌کنیم
+        collection_metadata = None
+        if vector_store_strategy == 'chroma':
+            collection_metadata = {"hnsw:space": "cosine"}
+
+        # ساخت و ذخیره ایندکس خالی
+        index_instance.create_and_save_empty(
+            path=os.path.join(session_dir, "index"),
+            metadatas=collection_metadata
+        )
+
+        # ساخت فایل اطلاعات جلسه
+        session_info = {
+            "session_id": session_id,
+            "vector_store_strategy": vector_store_strategy,
+            "documents": [] # لیست اسناد در ابتدا خالی است
+        }
+        with open(os.path.join(session_dir, "session_info.json"), 'w', encoding='utf-8') as f:
+            json.dump(session_info, f, indent=4)
+
+        return CreateSessionResponse(
+            session_id=session_id,
+            doc_uuid="", # هنوز سندی اضافه نشده است
+            message="جلسه خالی با موفقیت ایجاد شد. اکنون می‌توانید اسناد را به آن اضافه کنید."
+        )
+    except Exception as e:
+        logger.error(f"خطا در ایجاد جلسه خالی '{session_id}': {e}", exc_info=True)
+        raise ServiceException(status_code=500, error_code=40002, message=f"خطا در ایجاد جلسه خالی: {e}")
+
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-@app.post("/v1/rag/sessions", response_model=CreateSessionResponse, tags=["RAG API"])
-def create_session(
+
+
+@app.post("/v1/rag/sessions/{session_id}/documents", response_model=AddDocumentResponse, tags=["Sessions"])
+def add_or_create_session_document(
+    session_id: str,
     file: UploadFile = File(...),
     vector_store_strategy: str = Form("faiss", enum=["faiss", "chroma"]),
     extractor_strategy: str = Form(settings.defaults.extractor_strategy),
     chunker_strategy: str = Form(settings.defaults.chunker_strategy)
 ):
-    """یک جلسه جدید با اولین سند ایجاد می‌کند."""
-    # (منطق داخلی این تابع بدون تغییر باقی می‌ماند)
-    session_id = str(uuid.uuid4())
-    doc_uuid = str(uuid.uuid4())
-    logger.info(f"درخواست برای ایجاد جلسه جدید '{session_id}' با سند '{file.filename}'...")
-    texts, metadatas, vectors = _process_and_embed_file(file, extractor_strategy, chunker_strategy, doc_uuid)
-    try:
-        session_dir = os.path.join(settings.paths.index_dir, session_id)
-        os.makedirs(session_dir, exist_ok=True)
-        strategy_class = VECTOR_STORE_FACTORY[vector_store_strategy]
-        index_instance = strategy_class()
-        index_instance.create_index(texts=texts, vectors=vectors, metadatas=metadatas)
-        index_instance.save_local(os.path.join(session_dir, "index"))
-        session_info = {
-            "session_id": session_id, "vector_store_strategy": vector_store_strategy,
-            "documents": [{"doc_uuid": doc_uuid, "filename": file.filename, "added_at": datetime.now(timezone.utc).isoformat()}]
-        }
-        with open(os.path.join(session_dir, "session_info.json"), 'w', encoding='utf-8') as f:
-            json.dump(session_info, f, indent=4)
-        INDEX_CACHE[session_id] = index_instance
-        return CreateSessionResponse(session_id=session_id, doc_uuid=doc_uuid, message="جلسه جدید با موفقیت ایجاد شد.")
-    except Exception as e:
-        logger.error(f"خطا در ایجاد جلسه '{session_id}': {e}", exc_info=True)
-        raise ServiceException(status_code=500, error_code=40002, message=f"خطا در ایجاد جلسه: {e}")
-#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-@app.post("/v1/rag/sessions/{session_id}/documents", response_model=AddDocumentResponse, tags=["RAG API"])
-def add_document_to_session(session_id: str, file: UploadFile = File(...)):
-    """یک سند جدید را به یک جلسه موجود اضافه می‌کند."""
-    # (منطق داخلی این تابع بدون تغییر باقی می‌ماند)
-    logger.info(f"درخواست برای افزودن سند '{file.filename}' به جلسه '{session_id}'...")
+    """
+    یک سند را به جلسه مشخص شده اضافه می‌کند.
+    اگر جلسه وجود نداشته باشد، آن را با استراتژی مشخص شده ایجاد می‌کند.
+    """
+    logger.info(f"درخواست برای افزودن/ایجاد سند '{file.filename}' به جلسه '{session_id}'...")
+    
     session_dir = os.path.join(settings.paths.index_dir, session_id)
     info_path = os.path.join(session_dir, "session_info.json")
-    if not os.path.exists(info_path):
-        raise ServiceException(status_code=404, error_code=30002, message="جلسه یافت نشد.")
-    with open(info_path, 'r', encoding='utf-8') as f:
-        session_info = json.load(f)
+    index_store_path = os.path.join(session_dir, "index")
+    
+    # پردازش و امبدینگ فایل جدید
     doc_uuid = str(uuid.uuid4())
-    texts, metadatas, vectors = _process_and_embed_file(file, settings.defaults.extractor_strategy, settings.defaults.chunker_strategy, doc_uuid)
-    strategy_class = VECTOR_STORE_FACTORY[session_info["vector_store_strategy"]]
-    index_instance = strategy_class()
-    index_instance.load_local(os.path.join(session_dir, "index"))
-    index_instance.add_documents(texts=texts, vectors=vectors, metadatas=metadatas)
-    if isinstance(index_instance.vectorstore, FAISS):
-        index_instance.save_local(os.path.join(session_dir, "index"))
-    session_info["documents"].append({"doc_uuid": doc_uuid, "filename": file.filename, "added_at": datetime.now(timezone.utc).isoformat()})
-    with open(info_path, 'w', encoding='utf-8') as f:
-        json.dump(session_info, f, indent=4)
-    INDEX_CACHE[session_id] = index_instance
-    return AddDocumentResponse(session_id=session_id, doc_uuid=doc_uuid, message="سند با موفقیت اضافه شد.")
+    texts, metadatas, vectors = _process_and_embed_file(file, extractor_strategy, chunker_strategy, doc_uuid)
+    
+    try:
+        # بررسی وجود جلسه
+        if os.path.exists(info_path):
+            # --- سناریوی افزودن به جلسه موجود ---
+            logger.info(f"جلسه '{session_id}' وجود دارد. در حال افزودن سند جدید...")
+            with open(info_path, 'r', encoding='utf-8') as f:
+                session_info = json.load(f)
+            
+            strategy_class = VECTOR_STORE_FACTORY[session_info["vector_store_strategy"]]
+            index_instance = strategy_class()
+            index_instance.load_local(index_store_path)
+            index_instance.add_documents(texts=texts, vectors=vectors, metadatas=metadatas)
+            
+            if isinstance(index_instance.vectorstore, FAISS):
+                index_instance.save_local(index_store_path)
+            
+            session_info["documents"].append({
+                "doc_uuid": doc_uuid,
+                "filename": file.filename,
+                "added_at": datetime.now(timezone.utc).isoformat()
+            })
+            message = "سند با موفقیت به جلسه موجود اضافه شد."
+
+        else:
+            # --- سناریوی ایجاد جلسه جدید ---
+            logger.info(f"جلسه '{session_id}' یافت نشد. در حال ایجاد جلسه جدید...")
+            os.makedirs(session_dir, exist_ok=True)
+            
+            strategy_class = VECTOR_STORE_FACTORY[vector_store_strategy]
+            index_instance = strategy_class()
+            index_instance.create_index(texts=texts, vectors=vectors, metadatas=metadatas)
+            index_instance.save_local(index_store_path)
+
+            session_info = {
+                "session_id": session_id,
+                "vector_store_strategy": vector_store_strategy,
+                "documents": [{
+                    "doc_uuid": doc_uuid,
+                    "filename": file.filename,
+                    "added_at": datetime.now(timezone.utc).isoformat()
+                }]
+            }
+            message = "جلسه جدید با موفقیت ایجاد شد."
+
+        # ذخیره اطلاعات جلسه و به‌روزرسانی کش
+        with open(info_path, 'w', encoding='utf-8') as f:
+            json.dump(session_info, f, indent=4)
+        
+        INDEX_CACHE[session_id] = index_instance
+        return AddDocumentResponse(session_id=session_id, doc_uuid=doc_uuid, message=message)
+
+    except Exception as e:
+        logger.error(f"خطا در عملیات جلسه '{session_id}': {e}", exc_info=True)
+        raise ServiceException(status_code=500, error_code=40002, message=f"خطا در عملیات جلسه: {e}")
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 @app.get("/v1/rag/sessions/{session_id}", response_model=SessionInfoResponse, tags=["RAG API"])
