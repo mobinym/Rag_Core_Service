@@ -4,7 +4,7 @@ import yaml
 from pydantic import BaseModel
 from pathlib import Path
 
-# مدل‌های Pydantic برای اعتبارسنجی تنظیمات خوانده شده از فایل YAML
+
 class Paths(BaseModel):
     index_dir: str
 

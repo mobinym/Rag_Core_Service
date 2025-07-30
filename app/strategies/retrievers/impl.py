@@ -8,7 +8,7 @@ from langchain_core.prompts import PromptTemplate
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaLLM
 import logging
-from langchain_core.vectorstores import VectorStore # ✅ این خط را اضافه کنید
+from langchain_core.vectorstores import VectorStore 
 from langchain_chroma import Chroma
 from .base import BaseRetrieverStrategy
 from app.models.schemas import AskResponse, SourceDocument

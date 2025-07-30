@@ -14,8 +14,9 @@ import time
 from .errors import ServiceException, ERROR_CODES
 from .core.config import settings
 from .models.schemas import (
-    CreateSessionResponse, AskRequest, AskResponse, StructuredAskResponse, Chunk,
-    SessionInfoResponse, DocumentInfo, AddDocumentResponse, Reference
+    AskRequest, AskResponse, StructuredAskResponse, Chunk,
+    DocumentInfo, AddDocumentResponse, Reference,
+    CreateVSResponse, VSInfoResponse 
 )
 from .strategies.vector_stores.base import BaseVectorStoreStrategy
 from .strategies.vector_stores.impl import FAISSStrategy, ChromaStrategy
@@ -120,261 +121,298 @@ llm = OllamaLLM(model=settings.llm.model_name, base_url=settings.services.ollama
 
 
 # --- API Endpoints ---
-@app.post("/v1/rag/sessions/empty", response_model=CreateSessionResponse, tags=["Sessions"])
-def create_empty_session(
+@app.post("/v1/rag/vs/empty", response_model=CreateVSResponse, tags=["Vector Stores"])
+def create_empty_vs(
     vector_store_strategy: str = Form("faiss", enum=["faiss", "chroma"])
 ):
-    """یک جلسه جدید و خالی ایجاد کرده و شناسه آن را برمی‌گرداند."""
-    session_id = str(uuid.uuid4())
-    logger.info(f"درخواست برای ایجاد جلسه خالی جدید '{session_id}' با استراتژی '{vector_store_strategy}'...")
+    """یک Vector Store (VS) جدید و خالی ایجاد کرده و شناسه آن را برمی‌گرداند."""
+    vs_id = str(uuid.uuid4())
+    logger.info(f"درخواست برای ایجاد VS خالی جدید '{vs_id}' با استراتژی '{vector_store_strategy}'...")
 
     try:
-        session_dir = os.path.join(settings.paths.index_dir, session_id)
-        os.makedirs(session_dir, exist_ok=True)
+        vs_dir = os.path.join(settings.paths.index_dir, vs_id)
+        os.makedirs(vs_dir, exist_ok=True)
         
         strategy_class = VECTOR_STORE_FACTORY[vector_store_strategy]
         index_instance = strategy_class()
 
-        # برای Chroma، متریک فاصله را تنظیم می‌کنیم
         collection_metadata = None
         if vector_store_strategy == 'chroma':
             collection_metadata = {"hnsw:space": "cosine"}
 
-        # ساخت و ذخیره ایندکس خالی
         index_instance.create_and_save_empty(
-            path=os.path.join(session_dir, "index"),
+            path=os.path.join(vs_dir, "index"),
             metadatas=collection_metadata
         )
 
-        # ساخت فایل اطلاعات جلسه
-        session_info = {
-            "session_id": session_id,
+        
+        vs_info = {
+            "vs_id": vs_id,
             "vector_store_strategy": vector_store_strategy,
-            "documents": [] # لیست اسناد در ابتدا خالی است
+            "documents": [] 
         }
-        with open(os.path.join(session_dir, "session_info.json"), 'w', encoding='utf-8') as f:
-            json.dump(session_info, f, indent=4)
+        with open(os.path.join(vs_dir, "vs_info.json"), 'w', encoding='utf-8') as f:
+            json.dump(vs_info, f, indent=4, ensure_ascii=False)
 
-        return CreateSessionResponse(
-            session_id=session_id,
-            doc_uuid="", # هنوز سندی اضافه نشده است
-            message="جلسه خالی با موفقیت ایجاد شد. اکنون می‌توانید اسناد را به آن اضافه کنید."
+        return CreateVSResponse(
+            vs_id=vs_id,
+            doc_uuid="", 
+            message="VS خالی با موفقیت ایجاد شد. اکنون می‌توانید اسناد را به آن اضافه کنید."
         )
     except Exception as e:
-        logger.error(f"خطا در ایجاد جلسه خالی '{session_id}': {e}", exc_info=True)
-        raise ServiceException(status_code=500, error_code=40002, message=f"خطا در ایجاد جلسه خالی: {e}")
+        logger.error(f"خطا در ایجاد VS خالی '{vs_id}': {e}", exc_info=True)
+        raise ServiceException(status_code=500, error_code=40002, message=f"خطا در ایجاد VS خالی: {e}")
 
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-
-@app.post("/v1/rag/sessions/{session_id}/documents", response_model=AddDocumentResponse, tags=["Sessions"])
-def add_or_create_session_document(
-    session_id: str,
+@app.post("/v1/rag/vs/{vs_id}/documents", response_model=AddDocumentResponse, tags=["Vector Stores"])
+def add_document_to_vs(
+    vs_id: str,
     file: UploadFile = File(...),
-    vector_store_strategy: str = Form("faiss", enum=["faiss", "chroma"]),
+    
     extractor_strategy: str = Form(settings.defaults.extractor_strategy),
     chunker_strategy: str = Form(settings.defaults.chunker_strategy)
 ):
-    """
-    یک سند را به جلسه مشخص شده اضافه می‌کند.
-    اگر جلسه وجود نداشته باشد، آن را با استراتژی مشخص شده ایجاد می‌کند.
-    """
-    logger.info(f"درخواست برای افزودن/ایجاد سند '{file.filename}' به جلسه '{session_id}'...")
+    """یک سند جدید را با استراتژی‌های پردازش مشخص شده به یک VS موجود اضافه می‌کند."""
+    logger.info(f"درخواست برای افزودن سند '{file.filename}' به VS '{vs_id}'...")
     
-    session_dir = os.path.join(settings.paths.index_dir, session_id)
-    info_path = os.path.join(session_dir, "session_info.json")
-    index_store_path = os.path.join(session_dir, "index")
+    vs_dir = os.path.join(settings.paths.index_dir, vs_id)
+    info_path = os.path.join(vs_dir, "vs_info.json")
+    index_store_path = os.path.join(vs_dir, "index")
     
-    # پردازش و امبدینگ فایل جدید
+
+    if not os.path.exists(info_path):
+        raise ServiceException(status_code=404, error_code=30002, message="VS یافت نشد. لطفاً ابتدا یک VS خالی بسازید.")
+
+
     doc_uuid = str(uuid.uuid4())
-    texts, metadatas, vectors = _process_and_embed_file(file, extractor_strategy, chunker_strategy, doc_uuid)
+    texts, metadatas, vectors = _process_and_embed_file(
+        file, 
+        extractor_strategy, 
+        chunker_strategy,   
+        doc_uuid
+    )
     
     try:
-        # بررسی وجود جلسه
-        if os.path.exists(info_path):
-            # --- سناریوی افزودن به جلسه موجود ---
-            logger.info(f"جلسه '{session_id}' وجود دارد. در حال افزودن سند جدید...")
-            with open(info_path, 'r', encoding='utf-8') as f:
-                session_info = json.load(f)
-            
-            strategy_class = VECTOR_STORE_FACTORY[session_info["vector_store_strategy"]]
-            index_instance = strategy_class()
-            index_instance.load_local(index_store_path)
-            index_instance.add_documents(texts=texts, vectors=vectors, metadatas=metadatas)
-            
-            if isinstance(index_instance.vectorstore, FAISS):
-                index_instance.save_local(index_store_path)
-            
-            session_info["documents"].append({
-                "doc_uuid": doc_uuid,
-                "filename": file.filename,
-                "added_at": datetime.now(timezone.utc).isoformat()
-            })
-            message = "سند با موفقیت به جلسه موجود اضافه شد."
-
-        else:
-            # --- سناریوی ایجاد جلسه جدید ---
-            logger.info(f"جلسه '{session_id}' یافت نشد. در حال ایجاد جلسه جدید...")
-            os.makedirs(session_dir, exist_ok=True)
-            
-            strategy_class = VECTOR_STORE_FACTORY[vector_store_strategy]
-            index_instance = strategy_class()
-            index_instance.create_index(texts=texts, vectors=vectors, metadatas=metadatas)
-            index_instance.save_local(index_store_path)
-
-            session_info = {
-                "session_id": session_id,
-                "vector_store_strategy": vector_store_strategy,
-                "documents": [{
-                    "doc_uuid": doc_uuid,
-                    "filename": file.filename,
-                    "added_at": datetime.now(timezone.utc).isoformat()
-                }]
-            }
-            message = "جلسه جدید با موفقیت ایجاد شد."
-
-        # ذخیره اطلاعات جلسه و به‌روزرسانی کش
-        with open(info_path, 'w', encoding='utf-8') as f:
-            json.dump(session_info, f, indent=4)
+        with open(info_path, 'r', encoding='utf-8') as f:
+            vs_info = json.load(f)
         
-        INDEX_CACHE[session_id] = index_instance
-        return AddDocumentResponse(session_id=session_id, doc_uuid=doc_uuid, message=message)
+        strategy_class = VECTOR_STORE_FACTORY[vs_info["vector_store_strategy"]]
+        index_instance = strategy_class()
+        index_instance.load_local(index_store_path)
+        index_instance.add_documents(texts=texts, vectors=vectors, metadatas=metadatas)
+        
+        if isinstance(index_instance.vectorstore, FAISS):
+            index_instance.save_local(index_store_path)
+        
+       
+        vs_info["documents"].append({
+            "doc_uuid": doc_uuid,
+            "filename": file.filename,
+            "added_at": datetime.now(timezone.utc).isoformat()
+        })
+        with open(info_path, 'w', encoding='utf-8') as f:
+            json.dump(vs_info, f, indent=4, ensure_ascii=False)
+        
+        
+        INDEX_CACHE[vs_id] = index_instance
+        return AddDocumentResponse(vs_id=vs_id, doc_uuid=doc_uuid, message="سند با موفقیت به VS موجود اضافه شد.")
 
     except Exception as e:
-        logger.error(f"خطا در عملیات جلسه '{session_id}': {e}", exc_info=True)
-        raise ServiceException(status_code=500, error_code=40002, message=f"خطا در عملیات جلسه: {e}")
+        logger.error(f"خطا در افزودن سند به VS '{vs_id}': {e}", exc_info=True)
+        raise ServiceException(status_code=500, error_code=40002, message=f"خطا در عملیات VS: {e}")
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-@app.get("/v1/rag/sessions/{session_id}", response_model=SessionInfoResponse, tags=["RAG API"])
-def get_session_info(session_id: str):
-    """اطلاعات کامل یک جلسه و اسناد آن را برمی‌گرداند."""
-    # (منطق داخلی این تابع بدون تغییر باقی می‌ماند)
-    session_dir = os.path.join(settings.paths.index_dir, session_id)
-    info_path = os.path.join(session_dir, "session_info.json")
+@app.get("/v1/rag/vs/{vs_id}", response_model=VSInfoResponse, tags=["Vector Stores"])
+def get_vs_info(vs_id: str):
+    """اطلاعات کامل یک VS (Vector Store) و اسناد آن را برمی‌گرداند."""
+    vs_dir = os.path.join(settings.paths.index_dir, vs_id)
+    info_path = os.path.join(vs_dir, "vs_info.json") 
+    
     if not os.path.exists(info_path):
-        raise ServiceException(status_code=404, error_code=30002, message="جلسه یافت نشد.")
+        raise ServiceException(status_code=404, error_code=30002, message="VS یافت نشد.")
+        
     with open(info_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-@app.post("/v1/rag/sessions/{session_id}/chat", response_model=StructuredAskResponse, tags=["RAG API"])
-def ask_from_session(session_id: str, request: AskRequest):
-    """از یک جلسه مشخص سوال می‌پرسد."""
-    # (منطق داخلی این تابع بدون تغییر باقی می‌ماند)
+@app.post("/v1/rag/vs/{vs_id}/chat", response_model=StructuredAskResponse, tags=["Vector Stores"])
+def ask_from_vs(vs_id: str, request: AskRequest):
+    """Asks a question from a specific VS (Vector Store)."""
     start_time = time.time()
-    session_dir = os.path.join(settings.paths.index_dir, session_id)
-    info_path = os.path.join(session_dir, "session_info.json")
-    index_instance = INDEX_CACHE.get(session_id)
+    logger.info(f"API request for VS '{vs_id}' with strategy '{request.retrieval_strategy}'")
+    
+    vs_dir = os.path.join(settings.paths.index_dir, vs_id)
+    info_path = os.path.join(vs_dir, "vs_info.json")
+    
+    index_instance = INDEX_CACHE.get(vs_id)
     if not index_instance:
-        logger.info(f"ایندکس در کش نیست. در حال بارگذاری از دیسک برای جلسه: {session_id}")
+        logger.info(f"Index not in cache. Loading from disk for VS: {vs_id}")
         try:
             with open(info_path, 'r', encoding='utf-8') as f:
-                session_info = json.load(f)
-            strategy_class = VECTOR_STORE_FACTORY[session_info["vector_store_strategy"]]
+                vs_info = json.load(f)
+            strategy_class = VECTOR_STORE_FACTORY[vs_info["vector_store_strategy"]]
             index_instance = strategy_class()
-            index_instance.load_local(os.path.join(session_dir, "index"))
-            INDEX_CACHE[session_id] = index_instance
+            index_instance.load_local(os.path.join(vs_dir, "index"))
+            INDEX_CACHE[vs_id] = index_instance
         except FileNotFoundError:
-            raise ServiceException(status_code=404, error_code=30002, message="جلسه یافت نشد.")
+            raise ServiceException(status_code=404, error_code=30002, message="VS not found.")
         except Exception as e:
-            raise ServiceException(status_code=500, error_code=40003, message=f"خطا در بارگذاری ایندکس جلسه: {e}")
+            raise ServiceException(status_code=500, error_code=40003, message=f"Failed to load VS index: {e}")
+    
     retriever = RETRIEVERS.get(request.retrieval_strategy)
     try:
         raw_response: AskResponse = retriever.retrieve(query=request.query, vector_store=index_instance.vectorstore, llm=llm, top_k=request.top_k)
+        
         with open(info_path, 'r', encoding='utf-8') as f:
-            session_info = json.load(f)
-        structured_response = structure_final_response(raw_response, session_info)
-        # (بخش لاگ‌گیری مانیتورینگ)
+            vs_info = json.load(f)
+            
+        structured_response = structure_final_response(raw_response, vs_info)
+        
+        # (Monitoring log section)
+        monitoring_data = {
+            "session_id": vs_id, # Keeping "session_id" for internal log consistency is fine
+            "query": request.query,
+            "retrieval_strategy": request.retrieval_strategy,
+            "response_time_seconds": round(time.time() - start_time, 2),
+            "llm_answer": raw_response.answer,
+            "structured_response": structured_response.model_dump()
+        }
+        monitoring_logger.info("RAG Request Processed", extra=monitoring_data)
+
         return structured_response
+        
     except Exception as e:
-        raise ServiceException(status_code=500, error_code=40004, message=f"خطا در زمان بازیابی/تولید پاسخ: {e}")
+        logger.error(f"Error during retrieval for VS '{vs_id}': {e}", exc_info=True)
+        monitoring_logger.error("RAG Request Failed", extra={"session_id": vs_id, "query": request.query, "error": str(e)})
+        raise ServiceException(status_code=500, error_code=40004, message=f"An error occurred during retrieval/generation: {e}")
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
-@app.delete("/v1/rag/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["RAG API"])
-def delete_session(session_id: str):
-    """یک جلسه و تمام داده‌های مرتبط با آن را حذف می‌کند."""
-    # (منطق داخلی این تابع بدون تغییر باقی می‌ماند)
-    logger.info(f"درخواست برای حذف جلسه '{session_id}'...")
-    session_dir = os.path.join(settings.paths.index_dir, session_id)
-    if not os.path.exists(session_dir):
-        raise ServiceException(status_code=404, error_code=30002, message="جلسه یافت نشد.")
-    if session_id in INDEX_CACHE:
-        del INDEX_CACHE[session_id]
+@app.delete("/v1/rag/vs/{vs_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Vector Stores"])
+def delete_vs(vs_id: str):
+    """یک VS (Vector Store) و تمام داده‌های مرتبط با آن را حذف می‌کند."""
+    logger.info(f"درخواست برای حذف VS '{vs_id}'...")
+    
+    vs_dir = os.path.join(settings.paths.index_dir, vs_id)
+    
+    if not os.path.exists(vs_dir):
+        raise ServiceException(status_code=404, error_code=30002, message="VS یافت نشد.")
+        
+    if vs_id in INDEX_CACHE:
+        del INDEX_CACHE[vs_id]
         gc.collect()
+        
     try:
-        shutil.rmtree(session_dir)
-        logger.info(f"پوشه جلسه با موفقیت حذف شد: {session_dir}")
+        shutil.rmtree(vs_dir)
+        logger.info(f"پوشه VS با موفقیت حذف شد: {vs_dir}")
     except OSError as e:
-        logger.error(f"خطا در حذف پوشه جلسه {session_dir}: {e}", exc_info=True)
-        raise ServiceException(status_code=500, error_code=99999, message=f"خطا در حذف فایل‌های جلسه: {e}")
+        logger.error(f"خطا در حذف پوشه VS '{vs_dir}': {e}", exc_info=True)
+        raise ServiceException(status_code=500, error_code=99999, message=f"خطا در حذف فایل‌های VS: {e}")
+        
     return
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
-@app.delete("/v1/rag/sessions/{session_id}/documents/{doc_uuid}", tags=["RAG API"])
-def delete_document_from_session(session_id: str, doc_uuid: str):
-    """یک سند مشخص را از یک جلسه حذف می‌کند."""
-    # (منطق داخلی این تابع بدون تغییر باقی می‌ماند)
-    logger.info(f"درخواست برای حذف سند '{doc_uuid}' از جلسه '{session_id}'...")
-    session_dir = os.path.join(settings.paths.index_dir, session_id)
-    info_path = os.path.join(session_dir, "session_info.json")
-    index_store_path = os.path.join(session_dir, "index")
+@app.delete("/v1/rag/vs/{vs_id}/documents/{doc_uuid}", tags=["Vector Stores"])
+def delete_document_from_vs(vs_id: str, doc_uuid: str):
+    """
+    یک سند مشخص را بر اساس شناسه آن (doc_uuid) از یک VS حذف می‌کند.
+    """
+    logger.info(f"درخواست برای حذف سند '{doc_uuid}' از VS '{vs_id}'...")
+    
+    vs_dir = os.path.join(settings.paths.index_dir, vs_id)
+    info_path = os.path.join(vs_dir, "vs_info.json")
+    index_store_path = os.path.join(vs_dir, "index")
+
     if not os.path.exists(info_path):
-        raise ServiceException(status_code=404, error_code=30002, message="جلسه یافت نشد.")
+        raise ServiceException(status_code=404, error_code=30002, message="VS یافت نشد.")
+
     with open(info_path, 'r', encoding='utf-8') as f:
-        session_info = json.load(f)
-    doc_to_delete = next((doc for doc in session_info["documents"] if doc["doc_uuid"] == doc_uuid), None)
+        vs_info = json.load(f)
+    
+    doc_to_delete = next((doc for doc in vs_info["documents"] if doc["doc_uuid"] == doc_uuid), None)
     if not doc_to_delete:
-        raise ServiceException(status_code=404, error_code=30002, message=f"شناسه سند '{doc_uuid}' در جلسه یافت نشد.")
-    strategy_name = session_info["vector_store_strategy"]
+        raise ServiceException(status_code=404, error_code=30002, message=f"شناسه سند '{doc_uuid}' در VS یافت نشد.")
+
+    strategy_name = vs_info["vector_store_strategy"]
     strategy_class = VECTOR_STORE_FACTORY[strategy_name]
     index_instance = strategy_class()
     index_instance.load_local(index_store_path)
+
+
     if strategy_name == 'chroma':
+        logger.info("در حال اجرای استراتژی حذف برای Chroma...")
         index_instance.delete([doc_uuid])
+        message = f"سند '{doc_uuid}' با موفقیت از ایندکس Chroma حذف شد."
+    
     elif strategy_name == 'faiss':
-        # (منطق بازسازی FAISS)
-        pass # Placeholder for FAISS rebuild logic
-    session_info["documents"] = [doc for doc in session_info["documents"] if doc["doc_uuid"] != doc_uuid]
+        logger.info("در حال اجرای استراتژی حذف برای FAISS (بازسازی)...")
+        vector_store = index_instance.vectorstore
+        
+        retained_texts, retained_vectors, retained_metadatas = [], [], []
+        
+        
+        for i in range(vector_store.index.ntotal):
+            doc = vector_store.docstore.search(vector_store.index_to_docstore_id[i])
+            if doc.metadata.get("doc_uuid") != doc_uuid:
+                retained_texts.append(doc.page_content)
+                retained_vectors.append(vector_store.index.reconstruct(i).tolist())
+                retained_metadatas.append(doc.metadata)
+        
+        if not retained_texts:
+       
+            shutil.rmtree(vs_dir)
+            if vs_id in INDEX_CACHE: del INDEX_CACHE[vs_id]
+            return {"message": f"VS '{vs_id}' پس از حذف سند خالی شد و به طور کامل حذف گردید."}
+        
+     
+        new_strategy = FAISSStrategy()
+        new_strategy.create_index(texts=retained_texts, vectors=retained_vectors, metadatas=retained_metadatas)
+        new_strategy.save_local(index_store_path)
+        index_instance = new_strategy
+        message = f"سند '{doc_uuid}' با بازسازی ایندکس FAISS حذف شد."
+
+   
+    original_filename = doc_to_delete.get("filename", "N/A")
+    vs_info["documents"] = [doc for doc in vs_info["documents"] if doc["doc_uuid"] != doc_uuid]
     with open(info_path, 'w', encoding='utf-8') as f:
-        json.dump(session_info, f, indent=4)
-    INDEX_CACHE[session_id] = index_instance
-    return {"message": f"سند '{doc_uuid}' با موفقیت از جلسه حذف شد."}
+        json.dump(vs_info, f, indent=4, ensure_ascii=False)
+    
+    logger.info(f"سند '{original_filename}' (UUID: {doc_uuid}) از فایل اطلاعات حذف شد.")
+
+  
+    INDEX_CACHE[vs_id] = index_instance
+
+    return {"message": message}
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 
-# app/main.py
-
-@app.put("/sessions/{session_id}/documents/{doc_uuid}", tags=["Sessions"])
-def update_document_in_session(
-    session_id: str,
+@app.put("/v1/rag/vs/{vs_id}/documents/{doc_uuid}", tags=["Vector Stores"])
+def update_document_in_vs(
+    vs_id: str,
     doc_uuid: str,
     file: UploadFile = File(...)
 ):
     """
-    Atomically updates a document within a session by replacing it with a new file.
-    It deletes all old chunks and adds the new ones.
+    Atomically updates a document within a VS by replacing it with a new file.
     """
-    logger.info(f"Request to update document '{doc_uuid}' in session '{session_id}' with new file '{file.filename}'...")
+    logger.info(f"Request to update document '{doc_uuid}' in VS '{vs_id}' with new file '{file.filename}'...")
     
-    session_dir = os.path.join(settings.paths.index_dir, session_id)
-    info_path = os.path.join(session_dir, "session_info.json")
-    index_store_path = os.path.join(session_dir, "index")
+    vs_dir = os.path.join(settings.paths.index_dir, vs_id)
+    info_path = os.path.join(vs_dir, "vs_info.json")
+    index_store_path = os.path.join(vs_dir, "index")
 
     if not os.path.exists(info_path):
-        raise ServiceException(status_code=404, error_code=30002, message="Session not found.")
+        raise ServiceException(status_code=404, error_code=30002, message="VS not found.")
 
     with open(info_path, 'r', encoding='utf-8') as f:
-        session_info = json.load(f)
+        vs_info = json.load(f)
     
-    doc_to_update = next((doc for doc in session_info["documents"] if doc["doc_uuid"] == doc_uuid), None)
+    doc_to_update = next((doc for doc in vs_info["documents"] if doc["doc_uuid"] == doc_uuid), None)
     if not doc_to_update:
-        raise ServiceException(status_code=404, error_code=30002, message=f"Document UUID '{doc_uuid}' not found in session.")
+        raise ServiceException(status_code=404, error_code=30002, message=f"Document UUID '{doc_uuid}' not found in VS.")
 
-    # 1. Process and embed the NEW file
     new_texts, new_metadatas, new_vectors = _process_and_embed_file(
         file, settings.defaults.extractor_strategy, settings.defaults.chunker_strategy, doc_uuid
     )
     
-    # 2. Load the index
-    strategy_name = session_info["vector_store_strategy"]
+    strategy_name = vs_info["vector_store_strategy"]
     strategy_class = VECTOR_STORE_FACTORY[strategy_name]
     index_instance = strategy_class()
     index_instance.load_local(index_store_path)
@@ -407,18 +445,18 @@ def update_document_in_session(
         new_strategy.save_local(index_store_path)
         index_instance = new_strategy
 
-    # 4. Update the session_info.json file with the new filename
-    for doc in session_info["documents"]:
+    # 4. Update the vs_info.json file with the new filename
+    for doc in vs_info["documents"]:
         if doc["doc_uuid"] == doc_uuid:
             doc["filename"] = file.filename
             doc["added_at"] = datetime.now(timezone.utc).isoformat()
             break
             
     with open(info_path, 'w', encoding='utf-8') as f:
-        json.dump(session_info, f, indent=4, ensure_ascii=False)
+        json.dump(vs_info, f, indent=4, ensure_ascii=False)
     
     # 5. Update the in-memory cache
-    INDEX_CACHE[session_id] = index_instance
+    INDEX_CACHE[vs_id] = index_instance
 
     return {"message": f"Document '{doc_uuid}' was successfully updated with file '{file.filename}'."}
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------

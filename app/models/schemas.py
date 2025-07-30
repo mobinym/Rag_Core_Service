@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 from app.core.config import settings
 
-# --- مدل‌های ورودی و داخلی ---
+
 class Chunk(BaseModel):
     chunk_content: str
     metadata: Dict[str, Any]
@@ -23,24 +23,24 @@ class AskResponse(BaseModel):
     answer: str
     source_documents: List[SourceDocument]
 
-# --- مدل‌های خروجی نهایی ---
+
 class DocumentInfo(BaseModel):
     doc_uuid: str
     filename: str
     added_at: str
 
-class CreateSessionResponse(BaseModel):
-    session_id: str
+class CreateVSResponse(BaseModel): 
+    vs_id: str 
     doc_uuid: str
     message: str
 
 class AddDocumentResponse(BaseModel):
-    session_id: str
+    vs_id: str 
     doc_uuid: str
     message: str
 
-class SessionInfoResponse(BaseModel):
-    session_id: str
+class VSInfoResponse(BaseModel): 
+    vs_id: str 
     vector_store_strategy: str
     documents: List[DocumentInfo]
 

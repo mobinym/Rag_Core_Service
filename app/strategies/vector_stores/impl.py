@@ -14,7 +14,7 @@ import faiss # ایمپورت جدید
 logger = logging.getLogger(__name__) 
 
 EMBEDDING_DIM = 1024
-
+#------------------------------------------------------------------------------------------------------------------------------------
 class FAISSStrategy(BaseVectorStoreStrategy):
 
     
@@ -66,7 +66,6 @@ class FAISSStrategy(BaseVectorStoreStrategy):
         if not self.vectorstore:
             return False
         try:
-            # LangChain FAISS wrapper handles the string-to-int conversion for IDs
             self.vectorstore.delete(ids)
             logger.info(f"Successfully deleted {len(ids)} vectors from FAISS.")
             return True
@@ -75,12 +74,10 @@ class FAISSStrategy(BaseVectorStoreStrategy):
             return False
     def create_and_save_empty(self, path: str, metadatas: dict = None) -> None:
         """یک ایندکس خالی FAISS ساخته و ذخیره می‌کند."""
-        # ما باید یک ایندکس با ابعاد صحیح اما بدون داده بسازیم
         empty_index = faiss.IndexFlatL2(EMBEDDING_DIM)
         empty_docstore = InMemoryDocstore({})
         empty_index_to_docstore_id = {}
         
-        # ساخت آبجکت LangChain FAISS از اجزای خالی
         self.vectorstore = FAISS(
             embedding_function=self.embeddings,
             index=empty_index,
@@ -90,6 +87,7 @@ class FAISSStrategy(BaseVectorStoreStrategy):
         self.save_local(path)
         logger.info(f"ایندکس خالی FAISS در مسیر زیر ساخته و ذخیره شد: {path}")
 
+#------------------------------------------------------------------------------------------------------------------------------------
 class ChromaStrategy(BaseVectorStoreStrategy):
 
 
@@ -163,7 +161,6 @@ class ChromaStrategy(BaseVectorStoreStrategy):
         if not self.vectorstore:
             return False
         try:
-            # Chroma می‌تواند مستقیماً بر اساس فراداده حذف کند
             self.vectorstore.delete(where={"doc_uuid": {"$in": doc_uuids}})
             logger.info(f"Successfully deleted chunks for doc_uuids: {doc_uuids}")
             return True
@@ -174,7 +171,7 @@ class ChromaStrategy(BaseVectorStoreStrategy):
         """به‌صورت ایمن اتصال به ChromaDB را می‌بندد (برای جلوگیری از خطای حذف فایل در ویندوز)."""
         if self.vectorstore and hasattr(self.vectorstore, 'persist'):
             try:
-                self.vectorstore.persist()  # اگر چیزی برای ذخیره باشه، ذخیره می‌کنه
+                self.vectorstore.persist() 
                 self.vectorstore = None
                 logger.info("Chroma vectorstore safely closed.")
             except Exception as e:
@@ -182,7 +179,6 @@ class ChromaStrategy(BaseVectorStoreStrategy):
 
     def create_and_save_empty(self, path: str, metadatas: dict = None) -> None:
         """یک ایندکس خالی ChromaDB ساخته و ذخیره می‌کند."""
-        # برای Chroma، ساخت یک ایندکس خالی به سادگی مقداردهی اولیه با یک مسیر است
         self.vectorstore = Chroma(
             persist_directory=path,
             embedding_function=self.embeddings,
