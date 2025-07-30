@@ -61,7 +61,7 @@ async def generic_exception_handler(request: Request, exc: Exception):
     logger.error(f"An unexpected error occurred: {exc}", exc_info=True)
     return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"success": False, "error": {"code": 99999, "message": ERROR_CODES[99999]}})
 
-def _process_and_embed_file(file: UploadFile, extractor: str, chunker: str, doc_uuid: str) -> (List[str], List[dict], List[List[float]]):
+def _process_and_embed_file(file: UploadFile, extractor: str, chunker: str, doc_uuid: str) -> tuple[List[str], List[dict], List[List[float]]]:
     """فایل را از طریق سرویس‌های خارجی پردازش و امبد می‌کند."""
     try:
         files = {'file': (file.filename, file.file, file.content_type)}
