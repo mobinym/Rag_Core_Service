@@ -56,3 +56,7 @@ class Reference(BaseModel):
 class StructuredAskResponse(BaseModel):
     answer: str
     references: List[Reference]
+
+
+class RetrieveResponse(BaseModel):
+    source_documents: List[SourceDocument]

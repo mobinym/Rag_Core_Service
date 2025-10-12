@@ -11,7 +11,7 @@ import logging
 from langchain_core.vectorstores import VectorStore 
 from langchain_chroma import Chroma
 from .base import BaseRetrieverStrategy
-from app.models.schemas import AskResponse, SourceDocument
+from app.models.schemas import AskResponse, SourceDocument, RetrieveResponse # RetrieveResponse رو اضافه کنید
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,27 @@ class BasicRetriever(BaseRetrieverStrategy):
         
         source_documents = [SourceDocument(page_content=doc.page_content, metadata=doc.metadata, score=float(score)) for doc, score in docs_with_scores]
         return AskResponse(answer=answer, source_documents=source_documents)
+    
+    def retrieve_documents(self, query: str, vector_store: VectorStore, top_k: int) -> RetrieveResponse:
+        """فقط داکیومنت‌های مرتبط را بر اساس کوئری بازیابی می‌کند."""
+        query_vector = get_embedding_for_query(query)
+
+        docs_with_scores = []
+        if isinstance(vector_store, FAISS):
+            docs_with_scores = vector_store.similarity_search_with_score_by_vector(embedding=query_vector, k=top_k)
+        elif isinstance(vector_store, Chroma):
+            retrieved_docs = vector_store.similarity_search_by_vector(embedding=query_vector, k=top_k)
+            # Chroma به این شکل score برنمی‌گرداند، پس یک مقدار پیش‌فرض در نظر می‌گیریم
+            docs_with_scores = [(doc, 0.0) for doc in retrieved_docs]
+        else:
+            raise TypeError(f"Unsupported vector store type: {type(vector_store)}")
+
+        source_documents = [
+            SourceDocument(page_content=doc.page_content, metadata=doc.metadata, score=float(score))
+            for doc, score in docs_with_scores
+        ]
+        
+        return RetrieveResponse(source_documents=source_documents)
 
 class AdaptiveRetriever(BaseRetrieverStrategy):
     """Retriever پیشرفته، که از سرویس امبدینگ خارجی برای کوئری‌ها استفاده می‌کند."""
@@ -105,3 +126,23 @@ class AdaptiveRetriever(BaseRetrieverStrategy):
             
         source_documents = [SourceDocument(page_content=doc.page_content, metadata=doc.metadata, score=float(score)) for doc, score in docs_with_scores]
         return AskResponse(answer=answer, source_documents=source_documents)
+    
+    def retrieve_documents(self, query: str, vector_store: VectorStore, top_k: int) -> RetrieveResponse:
+        """فقط داکیومنت‌های مرتبط را بر اساس کوئری بازیابی می‌کند."""
+        query_vector = get_embedding_for_query(query)
+
+        docs_with_scores = []
+        if isinstance(vector_store, FAISS):
+            docs_with_scores = vector_store.similarity_search_with_score_by_vector(embedding=query_vector, k=top_k)
+        elif isinstance(vector_store, Chroma):
+            retrieved_docs = vector_store.similarity_search_by_vector(embedding=query_vector, k=top_k)
+            docs_with_scores = [(doc, 0.0) for doc in retrieved_docs]
+        else:
+            raise TypeError(f"Unsupported vector store type: {type(vector_store)}")
+
+        source_documents = [
+            SourceDocument(page_content=doc.page_content, metadata=doc.metadata, score=float(score))
+            for doc, score in docs_with_scores
+        ]
+        
+        return RetrieveResponse(source_documents=source_documents)

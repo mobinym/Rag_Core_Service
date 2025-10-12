@@ -16,7 +16,7 @@ from .core.config import settings
 from .models.schemas import (
     AskRequest, AskResponse, StructuredAskResponse, Chunk,
     DocumentInfo, AddDocumentResponse, Reference,
-    CreateVSResponse, VSInfoResponse 
+    CreateVSResponse, VSInfoResponse, RetrieveResponse 
 )
 from .strategies.vector_stores.base import BaseVectorStoreStrategy
 from .strategies.vector_stores.impl import FAISSStrategy, ChromaStrategy
@@ -285,6 +285,49 @@ def ask_from_vs(vs_id: str, request: AskRequest):
         monitoring_logger.error("RAG Request Failed", extra={"session_id": vs_id, "query": request.query, "error": str(e)})
         raise ServiceException(status_code=500, error_code=40004, message=f"An error occurred during retrieval/generation: {e}")
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+@app.post("/v1/rag/vs/{vs_id}/retrieve", response_model=RetrieveResponse, tags=["Vector Stores"])
+def retrieve_from_vs(vs_id: str, request: AskRequest):
+    """
+    Retrieves relevant source documents from a specific VS without generating an answer.
+    This is ideal for scenarios where the final answer generation is handled by another service (e.g., a Chainlit UI).
+    """
+    logger.info(f"Retrieval-only request for VS '{vs_id}' with strategy '{request.retrieval_strategy}'")
+    
+    vs_dir = os.path.join(settings.paths.index_dir, vs_id)
+    
+    
+    index_instance = INDEX_CACHE.get(vs_id)
+    if not index_instance:
+        logger.info(f"Index not in cache. Loading from disk for VS: {vs_id}")
+        try:
+            with open(os.path.join(vs_dir, "vs_info.json"), 'r', encoding='utf-8') as f:
+                vs_info = json.load(f)
+            strategy_class = VECTOR_STORE_FACTORY[vs_info["vector_store_strategy"]]
+            index_instance = strategy_class()
+            index_instance.load_local(os.path.join(vs_dir, "index"))
+            INDEX_CACHE[vs_id] = index_instance
+        except FileNotFoundError:
+            raise ServiceException(status_code=404, error_code=30002, message="VS not found.")
+        except Exception as e:
+            raise ServiceException(status_code=500, error_code=40003, message=f"Failed to load VS index: {e}")
+    
+    retriever = RETRIEVERS.get(request.retrieval_strategy)
+    if not retriever:
+        raise ServiceException(status_code=400, error_code=30001, message=f"Retrieval strategy '{request.retrieval_strategy}' not supported.")
+
+    try:
+        response = retriever.retrieve_documents(
+            query=request.query, 
+            vector_store=index_instance.vectorstore, 
+            top_k=request.top_k
+        )
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error during document retrieval for VS '{vs_id}': {e}", exc_info=True)
+        raise ServiceException(status_code=500, error_code=40004, message=f"An error occurred during retrieval: {e}")
+
+# -----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 @app.delete("/v1/rag/vs/{vs_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Vector Stores"])
 def delete_vs(vs_id: str):
     """یک VS (Vector Store) و تمام داده‌های مرتبط با آن را حذف می‌کند."""
