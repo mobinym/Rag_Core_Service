@@ -11,7 +11,7 @@ import logging
 from langchain_core.vectorstores import VectorStore 
 from langchain_chroma import Chroma
 from .base import BaseRetrieverStrategy
-from app.models.schemas import AskResponse, SourceDocument, RetrieveResponse # RetrieveResponse رو اضافه کنید
+from app.models.schemas import AskResponse, SourceDocument, RetrieveResponse 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
