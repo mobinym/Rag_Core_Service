@@ -14,7 +14,7 @@ services:
 
 defaults:
   extractor_strategy: "pdfFA"
-  chunker_strategy: "token_based"
+  chunker_strategy: "OllamaSemanticChunkerPersian"
   retrieval_strategy: "adaptive"
   top_k: 5
 
