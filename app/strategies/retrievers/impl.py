@@ -1,7 +1,7 @@
 # app/strategies/retrievers/impl.py
 
 import requests
-from typing import List
+from typing import List, Union
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -11,9 +11,10 @@ import logging
 from langchain_core.vectorstores import VectorStore 
 from langchain_chroma import Chroma
 from .base import BaseRetrieverStrategy
+from langchain.retrievers import EnsembleRetriever
 from app.models.schemas import AskResponse, SourceDocument, RetrieveResponse 
 from app.core.config import settings
-
+from ..vector_stores.impl import FAISSStrategy, ChromaStrategy
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +63,6 @@ class BasicRetriever(BaseRetrieverStrategy):
             docs_with_scores = vector_store.similarity_search_with_score_by_vector(embedding=query_vector, k=top_k)
         elif isinstance(vector_store, Chroma):
             retrieved_docs = vector_store.similarity_search_by_vector(embedding=query_vector, k=top_k)
-            # Chroma به این شکل score برنمی‌گرداند، پس یک مقدار پیش‌فرض در نظر می‌گیریم
             docs_with_scores = [(doc, 0.0) for doc in retrieved_docs]
         else:
             raise TypeError(f"Unsupported vector store type: {type(vector_store)}")
@@ -146,3 +146,53 @@ class AdaptiveRetriever(BaseRetrieverStrategy):
         ]
         
         return RetrieveResponse(source_documents=source_documents)
+    
+class HybridRRFRetriever:
+    
+    def retrieve_documents(self, query: str, index: Union[FAISSStrategy, ChromaStrategy], top_k: int, strategy_name: str) -> RetrieveResponse:
+        
+
+        if not isinstance(index, FAISSStrategy):
+            logger.warning("HybridRRFRetriever only supports modified FAISSStrategy. Skipping.")
+            raise NotImplementedError("HybridRRFRetriever only supports FAISSStrategy")
+
+        if not index.vectorstore:
+            raise RuntimeError("FAISS vectorstore is not loaded in the index strategy.")
+            
+        if not index.bm25_retriever:
+            logger.warning("BM25Retriever not found in FAISSStrategy. Falling back to vector search only.")
+            vector_retriever = index.vectorstore.as_retriever(search_kwargs={"k": top_k})
+            docs = vector_retriever.invoke(query) 
+
+        else:
+            logger.info(f"Performing Hybrid RRF Search for query: '{query}'")
+            
+            vector_retriever = index.vectorstore.as_retriever(search_kwargs={"k": top_k})
+            
+
+            index.bm25_retriever.k = top_k 
+            
+            ensemble_retriever = EnsembleRetriever(
+                retrievers=[index.bm25_retriever, vector_retriever],
+                weights=[0.5, 0.5] 
+            )
+            
+            hybrid_docs = ensemble_retriever.invoke(query) 
+            
+            docs = hybrid_docs[:top_k]
+
+        source_documents = []
+        for doc in docs:
+            source_documents.append(
+                SourceDocument(
+                    page_content=doc.page_content,
+                    metadata=doc.metadata,
+                    score=0.0
+                )
+            )
+            
+        return RetrieveResponse(
+            query=query,
+            source_documents=source_documents,
+            retrieval_strategy=strategy_name
+        )

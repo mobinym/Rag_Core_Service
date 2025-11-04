@@ -21,12 +21,12 @@ from .models.schemas import (
 from .strategies.vector_stores.base import BaseVectorStoreStrategy
 from .strategies.vector_stores.impl import FAISSStrategy, ChromaStrategy
 from .strategies.retrievers.base import BaseRetrieverStrategy
-from .strategies.retrievers.impl import BasicRetriever, AdaptiveRetriever
+from .strategies.retrievers.impl import BasicRetriever, AdaptiveRetriever, HybridRRFRetriever
 from langchain_ollama import OllamaLLM
 from prometheus_fastapi_instrumentator import Instrumentator
 from collections import defaultdict 
-from langchain_core.documents import Document
-from langchain.indexes import SQLRecordManager, index
+# from langchain_core.documents import Document
+# from langchain.indexes import SQLRecordManager, index
 import shutil
 from langchain_community.vectorstores import FAISS
 import gc
@@ -113,7 +113,7 @@ def structure_final_response(raw_response: AskResponse, session_info: dict) -> S
     return StructuredAskResponse(answer=answer, references=references)
 
 # --- Service Configuration ---
-RETRIEVERS: Dict[str, BaseRetrieverStrategy] = {"basic": BasicRetriever(), "adaptive": AdaptiveRetriever()}
+RETRIEVERS: Dict[str, BaseRetrieverStrategy] = {"basic": BasicRetriever(), "adaptive": AdaptiveRetriever(),"hybrid_rrf": HybridRRFRetriever()}
 VECTOR_STORE_FACTORY: Dict[str, type[BaseVectorStoreStrategy]] = {"faiss": FAISSStrategy, "chroma": ChromaStrategy}
 INDEX_CACHE: Dict[str, BaseVectorStoreStrategy] = {}
 llm = OllamaLLM(model=settings.llm.model_name, base_url=settings.services.ollama_base_url)
@@ -269,7 +269,7 @@ def ask_from_vs(vs_id: str, request: AskRequest):
         
         # (Monitoring log section)
         monitoring_data = {
-            "session_id": vs_id, # Keeping "session_id" for internal log consistency is fine
+            "session_id": vs_id, 
             "query": request.query,
             "retrieval_strategy": request.retrieval_strategy,
             "response_time_seconds": round(time.time() - start_time, 2),
@@ -316,11 +316,23 @@ def retrieve_from_vs(vs_id: str, request: AskRequest):
         raise ServiceException(status_code=400, error_code=30001, message=f"Retrieval strategy '{request.retrieval_strategy}' not supported.")
 
     try:
-        response = retriever.retrieve_documents(
-            query=request.query, 
-            vector_store=index_instance.vectorstore, 
-            top_k=request.top_k
-        )
+        response = None
+        
+        
+        if request.retrieval_strategy == "hybrid_rrf":
+            response = retriever.retrieve_documents(
+                query=request.query, 
+                index=index_instance, 
+                top_k=request.top_k,
+                strategy_name=request.retrieval_strategy
+            )
+        else:
+            response = retriever.retrieve_documents(
+                query=request.query, 
+                vector_store=index_instance.vectorstore, 
+                top_k=request.top_k
+            )
+            
         return response
         
     except Exception as e:

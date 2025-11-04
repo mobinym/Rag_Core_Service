@@ -13,9 +13,9 @@ services:
   record_manager_db_url: "postgresql://postgres:mysecretpassword@localhost:5432/rag_db"
 
 defaults:
-  extractor_strategy: "pdfFA"
-  chunker_strategy: "OllamaSemanticChunkerPersian"
-  retrieval_strategy: "adaptive"
+  extractor_strategy: "docx"
+  chunker_strategy: "token_based"
+  retrieval_strategy: "hybrid_rrf"
   top_k: 5
 
 llm:

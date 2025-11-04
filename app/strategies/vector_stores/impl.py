@@ -6,10 +6,10 @@ from langchain_community.vectorstores import FAISS
 from langchain_chroma import Chroma
 from langchain_community.embeddings import FakeEmbeddings
 from .base import BaseVectorStoreStrategy
-import logging # ✅ ایمپورت کردن logging
+import logging 
 from langchain_community.docstore.in_memory import InMemoryDocstore
-import numpy as np # ایمپورت جدید
-import faiss # ایمپورت جدید
+import faiss 
+from langchain_community.retrievers import BM25Retriever
 
 logger = logging.getLogger(__name__) 
 
@@ -17,9 +17,44 @@ EMBEDDING_DIM = 1024
 #------------------------------------------------------------------------------------------------------------------------------------
 class FAISSStrategy(BaseVectorStoreStrategy):
 
-    
     def __init__(self, embeddings=None):
         super().__init__(embeddings=FakeEmbeddings(size=EMBEDDING_DIM))
+        self.bm25_retriever: BM25Retriever = None 
+
+    def _build_bm25_retriever(self):
+        """
+        یک BM25Retriever از اسناد موجود در docstore می‌سازد یا به‌روز می‌کند.
+        این متد باید بعد از هر تغییری در vectorstore (load, create, add, delete) فراخوانی شود.
+        """
+        if not self.vectorstore:
+            logger.warning("Vector store is not initialized. Cannot build BM25Retriever.")
+            self.bm25_retriever = None
+            return
+
+        logger.info("Building/Rebuilding BM25Retriever from docstore...")
+        try:
+            doc_ids = list(self.vectorstore.index_to_docstore_id.values())
+            
+            if not doc_ids:
+                logger.warning("No documents in docstore to build BM25Retriever. Initializing empty.")
+                self.bm25_retriever = BM25Retriever.from_documents([])
+                return
+
+            all_docs = [self.vectorstore.docstore.search(doc_id) for doc_id in doc_ids]
+            
+            valid_docs = [doc for doc in all_docs if doc is not None]
+
+            if not valid_docs:
+                logger.warning("No valid documents found in docstore for BM25. Initializing empty.")
+                self.bm25_retriever = BM25Retriever.from_documents([])
+                return
+
+            self.bm25_retriever = BM25Retriever.from_documents(valid_docs)
+            logger.info(f"Successfully built BM25Retriever with {len(valid_docs)} documents.")
+        
+        except Exception as e:
+            logger.error(f"Failed to build BM25Retriever: {e}", exc_info=True)
+            self.bm25_retriever = None
 
     def create_index(self, texts: List[str], vectors: List[List[float]], metadatas: List[dict]) -> None:
         if not texts or not vectors:
@@ -31,8 +66,9 @@ class FAISSStrategy(BaseVectorStoreStrategy):
             embedding=self.embeddings,
             metadatas=metadatas
         )
-        # print("FAISS index created successfully in-memory.")
         logger.info("FAISS index created successfully in-memory.")
+        
+        self._build_bm25_retriever() 
 
     def save_local(self, path: str) -> None:
         if not self.vectorstore:
@@ -40,7 +76,6 @@ class FAISSStrategy(BaseVectorStoreStrategy):
         
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.vectorstore.save_local(path)
-        # print(f"FAISS index saved to: {path}")
         logger.info(f"FAISS index saved to: {path}") 
 
     def load_local(self, path: str) -> None:
@@ -48,8 +83,9 @@ class FAISSStrategy(BaseVectorStoreStrategy):
             raise FileNotFoundError(f"No FAISS index found at {path}")
             
         self.vectorstore = FAISS.load_local(path, self.embeddings, allow_dangerous_deserialization=True)
-        # print(f"FAISS index loaded from: {path}")
-        logger.info(f"FAISS index loaded from: {path}") 
+        logger.info(f"FAISS index loaded from: {path}")
+        
+        self._build_bm25_retriever()
 
     def add_documents(self, texts: List[str], vectors: List[List[float]], metadatas: List[dict]):
         """اسناد جدید را به ایندکس FAISS موجود اضافه می‌کند."""
@@ -57,21 +93,27 @@ class FAISSStrategy(BaseVectorStoreStrategy):
             raise RuntimeError("Vector store is not loaded or created yet.")
         text_embedding_pairs = list(zip(texts, vectors))
         self.vectorstore.add_embeddings(text_embeddings=text_embedding_pairs, metadatas=metadatas)
-        # print(f"Added {len(texts)} new documents to the existing FAISS index.")
+        logger.info(f"Added {len(texts)} new documents. Rebuilding BM25...")
+        
+        self._build_bm25_retriever() 
+
     def delete(self, ids: List[str]) -> bool:
         """
         وکتورها را بر اساس شناسه‌های داخلی FAISS حذف می‌کند.
-        این متد توسط تابع index در LangChain استفاده می‌شود.
         """
         if not self.vectorstore:
             return False
         try:
             self.vectorstore.delete(ids)
             logger.info(f"Successfully deleted {len(ids)} vectors from FAISS.")
+            logger.info("Rebuilding BM25 after deletion...")
+            
+            self._build_bm25_retriever()
             return True
         except Exception as e:
             logger.error(f"Failed to delete from FAISS: {e}")
             return False
+            
     def create_and_save_empty(self, path: str, metadatas: dict = None) -> None:
         """یک ایندکس خالی FAISS ساخته و ذخیره می‌کند."""
         empty_index = faiss.IndexFlatL2(EMBEDDING_DIM)
@@ -84,9 +126,11 @@ class FAISSStrategy(BaseVectorStoreStrategy):
             docstore=empty_docstore,
             index_to_docstore_id=empty_index_to_docstore_id
         )
+        
+        self._build_bm25_retriever() 
+        
         self.save_local(path)
         logger.info(f"ایندکس خالی FAISS در مسیر زیر ساخته و ذخیره شد: {path}")
-
 #------------------------------------------------------------------------------------------------------------------------------------
 class ChromaStrategy(BaseVectorStoreStrategy):
 
