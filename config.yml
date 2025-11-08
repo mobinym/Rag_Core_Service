@@ -14,7 +14,7 @@ services:
 
 defaults:
   extractor_strategy: "docx"
-  chunker_strategy: "token_based"
+  chunker_strategy: "openrouter_semantic"
   retrieval_strategy: "hybrid_rrf"
   top_k: 5
 

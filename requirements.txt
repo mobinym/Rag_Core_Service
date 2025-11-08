@@ -9,7 +9,15 @@ requests
 # --- LangChain & RAG Components ---
 langchain-community>=0.2.0
 langchain-ollama
-langchain-chroma 
+# chromadb==0.5.5
+# langchain-chroma==0.1.2
+
+requests==2.32.3
+
+# --- LangChain & RAG Core ---
+langchain==0.2.14
+langchain-core==0.2.39
+
 # --- Vector Stores ---
 faiss-cpu
 chromadb
@@ -23,7 +31,5 @@ prometheus-fastapi-instrumentator
 python-json-logger
 PyYAML
 python-multipart
-#-------------
-shutil
-gc 
-time 
+requests
+rank_bm25

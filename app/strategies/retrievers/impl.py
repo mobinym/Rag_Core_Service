@@ -148,9 +148,8 @@ class AdaptiveRetriever(BaseRetrieverStrategy):
         return RetrieveResponse(source_documents=source_documents)
     
 class HybridRRFRetriever:
-    
+
     def retrieve_documents(self, query: str, index: Union[FAISSStrategy, ChromaStrategy], top_k: int, strategy_name: str) -> RetrieveResponse:
-        
 
         if not isinstance(index, FAISSStrategy):
             logger.warning("HybridRRFRetriever only supports modified FAISSStrategy. Skipping.")
@@ -159,21 +158,23 @@ class HybridRRFRetriever:
         if not index.vectorstore:
             raise RuntimeError("FAISS vectorstore is not loaded in the index strategy.")
             
+        vector_retriever = index.vectorstore.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": top_k}
+        )
+        # -------------------------
+            
         if not index.bm25_retriever:
-            logger.warning("BM25Retriever not found in FAISSStrategy. Falling back to vector search only.")
-            vector_retriever = index.vectorstore.as_retriever(search_kwargs={"k": top_k})
+            logger.warning("BM25Retriever not found in FAISSStrategy. Falling back to vector search only (using MMR).")
             docs = vector_retriever.invoke(query) 
 
         else:
-            logger.info(f"Performing Hybrid RRF Search for query: '{query}'")
+            logger.info(f"Performing Hybrid RRF Search for query: '{query}' (using MMR for vector part)")
             
-            vector_retriever = index.vectorstore.as_retriever(search_kwargs={"k": top_k})
-            
-
             index.bm25_retriever.k = top_k 
             
             ensemble_retriever = EnsembleRetriever(
-                retrievers=[index.bm25_retriever, vector_retriever],
+                retrievers=[index.bm25_retriever, vector_retriever], 
                 weights=[0.5, 0.5] 
             )
             
@@ -187,7 +188,7 @@ class HybridRRFRetriever:
                 SourceDocument(
                     page_content=doc.page_content,
                     metadata=doc.metadata,
-                    score=0.0
+                    score=0.0  
                 )
             )
             
