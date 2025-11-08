@@ -10,7 +10,7 @@ requests
 langchain-community>=0.2.0
 langchain-ollama
 # chromadb==0.5.5
-# langchain-chroma==0.1.2
+langchain-chroma
 
 requests==2.32.3
 
