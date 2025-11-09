@@ -22,38 +22,47 @@ class FAISSStrategy(BaseVectorStoreStrategy):
         self.bm25_retriever: BM25Retriever = None 
 
     def _build_bm25_retriever(self):
-        """
-        یک BM25Retriever از اسناد موجود در docstore می‌سازد یا به‌روز می‌کند.
-        این متد باید بعد از هر تغییری در vectorstore (load, create, add, delete) فراخوانی شود.
-        """
-        if not self.vectorstore:
-            logger.warning("Vector store is not initialized. Cannot build BM25Retriever.")
+        if not self.vectorstore or \
+        not hasattr(self.vectorstore, 'docstore') or \
+        not hasattr(self.vectorstore, 'index_to_docstore_id'):
+            
+            logger.warning(
+                "Vector store is not fully initialized (missing docstore or index_to_docstore_id). "
+                "Cannot build BM25Retriever."
+            )
             self.bm25_retriever = None
             return
 
         logger.info("Building/Rebuilding BM25Retriever from docstore...")
         try:
+            if not self.vectorstore.index_to_docstore_id:
+                logger.warning("No documents in docstore (index_to_docstore_id is empty). Setting BM25Retriever to None.")
+                self.bm25_retriever = None
+                return
+
             doc_ids = list(self.vectorstore.index_to_docstore_id.values())
             
+
             if not doc_ids:
-                logger.warning("No documents in docstore to build BM25Retriever. Initializing empty.")
-                self.bm25_retriever = BM25Retriever.from_documents([])
+                logger.warning("No document IDs found. Setting BM25Retriever to None.")
+                self.bm25_retriever = None
                 return
 
             all_docs = [self.vectorstore.docstore.search(doc_id) for doc_id in doc_ids]
             
             valid_docs = [doc for doc in all_docs if doc is not None]
 
+
             if not valid_docs:
-                logger.warning("No valid documents found in docstore for BM25. Initializing empty.")
-                self.bm25_retriever = BM25Retriever.from_documents([])
+                logger.warning("No valid documents found in docstore for BM25. Setting BM25Retriever to None.")
+                self.bm25_retriever = None
                 return
 
             self.bm25_retriever = BM25Retriever.from_documents(valid_docs)
             logger.info(f"Successfully built BM25Retriever with {len(valid_docs)} documents.")
         
         except Exception as e:
-            logger.error(f"Failed to build BM25Retriever: {e}", exc_info=True)
+            logger.error(f"Failed to build BM25Retriever due to an unexpected error: {e}", exc_info=True)
             self.bm25_retriever = None
 
     def create_index(self, texts: List[str], vectors: List[List[float]], metadatas: List[dict]) -> None:
