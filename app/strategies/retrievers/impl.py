@@ -149,7 +149,14 @@ class AdaptiveRetriever(BaseRetrieverStrategy):
     
 class HybridRRFRetriever:
 
-    def retrieve_documents(self, query: str, index: Union[FAISSStrategy, ChromaStrategy], top_k: int, strategy_name: str) -> RetrieveResponse:
+    def retrieve_documents(self, 
+                           query: str, 
+                           index: Union[FAISSStrategy, ChromaStrategy], 
+                           top_k: int,
+                           strategy_name: str,  
+                           vector_search_type: str = "similarity",
+                           weights: List[float] = [0.3, 0.7]
+                           ) -> RetrieveResponse:
 
         if not isinstance(index, FAISSStrategy):
             logger.warning("HybridRRFRetriever only supports modified FAISSStrategy. Skipping.")
@@ -158,24 +165,32 @@ class HybridRRFRetriever:
         if not index.vectorstore:
             raise RuntimeError("FAISS vectorstore is not loaded in the index strategy.")
             
+        
+        search_kwargs = {"k": top_k}
+        if vector_search_type == "mmr":
+            search_kwargs["fetch_k"] = top_k * 5 
+            logger.info(f"Using vector search: MMR (k={top_k}, fetch_k={search_kwargs['fetch_k']})")
+        else:
+            logger.info(f"Using vector search: Similarity (k={top_k})")
+
         vector_retriever = index.vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": top_k}
+            search_type=vector_search_type,
+            search_kwargs=search_kwargs
         )
         # -------------------------
             
         if not index.bm25_retriever:
-            logger.warning("BM25Retriever not found in FAISSStrategy. Falling back to vector search only (using MMR).")
+            logger.warning(f"BM25Retriever not found. Falling back to vector search only (type: {vector_search_type}).")
             docs = vector_retriever.invoke(query) 
 
         else:
-            logger.info(f"Performing Hybrid RRF Search for query: '{query}' (using MMR for vector part)")
+            logger.info(f"Performing Hybrid RRF Search (BM25 weight={weights[0]}, Vector weight={weights[1]})")
             
             index.bm25_retriever.k = top_k 
             
             ensemble_retriever = EnsembleRetriever(
                 retrievers=[index.bm25_retriever, vector_retriever], 
-                weights=[0.5, 0.5] 
+                weights=weights 
             )
             
             hybrid_docs = ensemble_retriever.invoke(query) 
@@ -193,7 +208,5 @@ class HybridRRFRetriever:
             )
             
         return RetrieveResponse(
-            query=query,
-            source_documents=source_documents,
-            retrieval_strategy=strategy_name
+            source_documents=source_documents
         )

@@ -1,7 +1,7 @@
 # app/models/schemas.py
 
 from pydantic import BaseModel
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Literal
 from app.core.config import settings
 
 
@@ -13,6 +13,7 @@ class AskRequest(BaseModel):
     query: str
     retrieval_strategy: str = settings.defaults.retrieval_strategy
     top_k: int = settings.defaults.top_k
+    vector_search_type: Literal["similarity", "mmr"] = "mmr"
 
 class SourceDocument(BaseModel):
     page_content: str

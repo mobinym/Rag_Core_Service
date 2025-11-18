@@ -289,7 +289,6 @@ def ask_from_vs(vs_id: str, request: AskRequest):
 def retrieve_from_vs(vs_id: str, request: AskRequest):
     """
     Retrieves relevant source documents from a specific VS without generating an answer.
-    This is ideal for scenarios where the final answer generation is handled by another service (e.g., a Chainlit UI).
     """
     logger.info(f"Retrieval-only request for VS '{vs_id}' with strategy '{request.retrieval_strategy}'")
     
@@ -318,13 +317,13 @@ def retrieve_from_vs(vs_id: str, request: AskRequest):
     try:
         response = None
         
-        
         if request.retrieval_strategy == "hybrid_rrf":
             response = retriever.retrieve_documents(
                 query=request.query, 
                 index=index_instance, 
                 top_k=request.top_k,
-                strategy_name=request.retrieval_strategy
+                strategy_name=request.retrieval_strategy, 
+                vector_search_type=request.vector_search_type
             )
         else:
             response = retriever.retrieve_documents(
