@@ -155,7 +155,7 @@ class HybridRRFRetriever:
                            top_k: int,
                            strategy_name: str,  
                            vector_search_type: str = "similarity",
-                           weights: List[float] = [0.3, 0.7]
+                           weights: List[float] = [0.5, 0.5]
                            ) -> RetrieveResponse:
 
         if not isinstance(index, FAISSStrategy):
