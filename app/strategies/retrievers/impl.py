@@ -147,66 +147,92 @@ class AdaptiveRetriever(BaseRetrieverStrategy):
         
         return RetrieveResponse(source_documents=source_documents)
     
-class HybridRRFRetriever:
+class HybridRRFRetriever(BaseRetrieverStrategy):
+    def __init__(self, weights: List[float] = None, vector_search_type: str = "mmr"):
+        self.weights = weights or [0.2, 0.8] 
+        self.vector_search_type = vector_search_type
+
+    def retrieve(self, query: str, vector_store: VectorStore, llm: OllamaLLM, top_k: int) -> AskResponse:
+        retrieve_response = self.retrieve_documents(query, vector_store, top_k)
+        docs = retrieve_response.source_documents
+
+        if not docs:
+            return AskResponse(answer="اطلاعاتی یافت نشد.", source_documents=[])
+
+
+        context_docs = [doc for doc in docs] 
+        context = "\n\n---\n\n".join([doc.page_content for doc in context_docs])
+        
+        prompt = PromptTemplate.from_template("Context: {context}\n\nQuestion: {question}\n\nAnswer:")
+        chain = prompt | llm | StrOutputParser()
+        answer = chain.invoke({"context": context, "question": query}).strip()
+
+        return AskResponse(answer=answer, source_documents=docs)
 
     def retrieve_documents(self, 
                            query: str, 
-                           index: Union[FAISSStrategy, ChromaStrategy], 
-                           top_k: int,
-                           strategy_name: str,  
-                           vector_search_type: str = "similarity",
-                           weights: List[float] = [0.5, 0.5]
+                           vector_store: Union[VectorStore, object], 
+                           top_k: int, 
+                           strategy_name: str = "hybrid_rrf",
+                           vector_search_type: str = "mmr",
+                           weights: List[float] = None
                            ) -> RetrieveResponse:
-
-        if not isinstance(index, FAISSStrategy):
-            logger.warning("HybridRRFRetriever only supports modified FAISSStrategy. Skipping.")
-            raise NotImplementedError("HybridRRFRetriever only supports FAISSStrategy")
-
-        if not index.vectorstore:
-            raise RuntimeError("FAISS vectorstore is not loaded in the index strategy.")
-            
         
+        current_weights = weights or self.weights
+        
+
+        bm25_retriever = None
+        target_vector_store = vector_store
+
+        if hasattr(vector_store, "bm25_retriever"):
+            bm25_retriever = vector_store.bm25_retriever
+            if hasattr(vector_store, "vectorstore"):
+                target_vector_store = vector_store.vectorstore
+        
+        if not isinstance(target_vector_store, FAISS):
+            logger.warning("Hybrid search fallback: Vector store is not FAISS. Falling back to vector search only.")
+            if hasattr(target_vector_store, "as_retriever"):
+                 retriever = target_vector_store.as_retriever(search_kwargs={"k": top_k})
+                 docs = retriever.invoke(query)
+                 return self._format_docs(docs)
+            else:
+                 raise ValueError("Invalid vector store provided for Hybrid search.")
+
         search_kwargs = {"k": top_k}
         if vector_search_type == "mmr":
-            search_kwargs["fetch_k"] = top_k * 5 
-            logger.info(f"Using vector search: MMR (k={top_k}, fetch_k={search_kwargs['fetch_k']})")
-        else:
-            logger.info(f"Using vector search: Similarity (k={top_k})")
-
-        vector_retriever = index.vectorstore.as_retriever(
+            search_kwargs["fetch_k"] = top_k * 5
+        
+        vector_retriever = target_vector_store.as_retriever(
             search_type=vector_search_type,
             search_kwargs=search_kwargs
         )
-        # -------------------------
-            
-        if not index.bm25_retriever:
-            logger.warning(f"BM25Retriever not found. Falling back to vector search only (type: {vector_search_type}).")
-            docs = vector_retriever.invoke(query) 
 
+        if not bm25_retriever:
+            logger.warning("BM25Retriever not found on the provided store. Performing Standard Vector Search instead.")
+            docs = vector_retriever.invoke(query)
         else:
-            logger.info(f"Performing Hybrid RRF Search (BM25 weight={weights[0]}, Vector weight={weights[1]})")
-            
-            index.bm25_retriever.k = top_k 
+            logger.info(f"Performing Hybrid RRF Search (BM25={current_weights[0]}, Vector={current_weights[1]})")
+            bm25_retriever.k = top_k
             
             ensemble_retriever = EnsembleRetriever(
-                retrievers=[index.bm25_retriever, vector_retriever], 
-                weights=weights 
+                retrievers=[bm25_retriever, vector_retriever],
+                weights=current_weights
             )
             
-            hybrid_docs = ensemble_retriever.invoke(query) 
-            
-            docs = hybrid_docs[:top_k]
+            docs = ensemble_retriever.invoke(query)
+            docs = docs[:top_k]
 
+        return self._format_docs(docs)
+
+    def _format_docs(self, docs: List[Document]) -> RetrieveResponse:
+        """helper برای فرمت‌دهی خروجی"""
         source_documents = []
         for doc in docs:
             source_documents.append(
                 SourceDocument(
                     page_content=doc.page_content,
                     metadata=doc.metadata,
-                    score=0.0  
+                    score=0.0 
                 )
             )
-            
-        return RetrieveResponse(
-            source_documents=source_documents
-        )
+        return RetrieveResponse(source_documents=source_documents)
