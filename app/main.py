@@ -164,6 +164,33 @@ def create_empty_vs(
         raise ServiceException(status_code=500, error_code=40002, message=f"خطا در ایجاد VS خالی: {e}")
 
 #-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+@app.get("/v1/rag/vs/{vs_id}/debug_chunks", tags=["Debug"])
+def debug_all_chunks(vs_id: str):
+    """تمام چانک‌های ذخیره شده در دیتابیس FAISS را برمی‌گرداند."""
+    try:
+        vs_dir = os.path.join(settings.paths.index_dir, vs_id)
+        index_path = os.path.join(vs_dir, "index")
+        
+        # لود کردن ایندکس
+        index_instance = FAISSStrategy()
+        index_instance.load_local(index_path)
+        vectorstore = index_instance.vectorstore
+        
+        all_docs = []
+        # استخراج تمام داکیومنت‌ها از Docstore
+        for key, doc in vectorstore.docstore._dict.items():
+            all_docs.append({
+                "id": key,
+                "content": doc.page_content, # فقط ۱۰۰ کاراکتر اول
+                "metadata": doc.metadata
+            })
+            
+        return {"total_chunks": len(all_docs), "chunks": all_docs}
+        
+    except Exception as e:
+        return {"error": str(e)}
+#-----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
 @app.post("/v1/rag/vs/{vs_id}/documents", response_model=AddDocumentResponse, tags=["Vector Stores"])
 def add_document_to_vs(
     vs_id: str,
@@ -260,8 +287,12 @@ def ask_from_vs(vs_id: str, request: AskRequest):
     
     retriever = RETRIEVERS.get(request.retrieval_strategy)
     try:
-        raw_response: AskResponse = retriever.retrieve(query=request.query, vector_store=index_instance.vectorstore, llm=llm, top_k=request.top_k)
-        
+        raw_response: AskResponse = retriever.retrieve(
+            query=request.query,
+            vector_store=index_instance.vectorstore,
+            llm=llm,
+            top_k=request.top_k
+        )        
         with open(info_path, 'r', encoding='utf-8') as f:
             vs_info = json.load(f)
             
@@ -317,20 +348,11 @@ def retrieve_from_vs(vs_id: str, request: AskRequest):
     try:
         response = None
         
-        if request.retrieval_strategy == "hybrid_rrf":
-            response = retriever.retrieve_documents(
-                query=request.query, 
-                index=index_instance, 
-                top_k=request.top_k,
-                strategy_name=request.retrieval_strategy, 
-                vector_search_type=request.vector_search_type
-            )
-        else:
-            response = retriever.retrieve_documents(
-                query=request.query, 
-                vector_store=index_instance.vectorstore, 
-                top_k=request.top_k
-            )
+        response = retriever.retrieve_documents(
+        query=request.query,
+        vector_store=index_instance.vectorstore,
+        top_k=request.top_k
+    )
             
         return response
         
