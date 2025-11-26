@@ -23,48 +23,33 @@ class FAISSStrategy(BaseVectorStoreStrategy):
 
     def _build_bm25_retriever(self):
         if not self.vectorstore or \
-        not hasattr(self.vectorstore, 'docstore') or \
-        not hasattr(self.vectorstore, 'index_to_docstore_id'):
-            
-            logger.warning(
-                "Vector store is not fully initialized (missing docstore or index_to_docstore_id). "
-                "Cannot build BM25Retriever."
-            )
+           not hasattr(self.vectorstore, 'docstore') or \
+           not hasattr(self.vectorstore, 'index_to_docstore_id'):
             self.bm25_retriever = None
             return
 
-        logger.info("Building/Rebuilding BM25Retriever from docstore...")
         try:
-            if not self.vectorstore.index_to_docstore_id:
-                logger.warning("No documents in docstore (index_to_docstore_id is empty). Setting BM25Retriever to None.")
-                self.bm25_retriever = None
-                return
-
             doc_ids = list(self.vectorstore.index_to_docstore_id.values())
-            
-
             if not doc_ids:
-                logger.warning("No document IDs found. Setting BM25Retriever to None.")
                 self.bm25_retriever = None
                 return
 
             all_docs = [self.vectorstore.docstore.search(doc_id) for doc_id in doc_ids]
-            
             valid_docs = [doc for doc in all_docs if doc is not None]
 
-
-            if not valid_docs:
-                logger.warning("No valid documents found in docstore for BM25. Setting BM25Retriever to None.")
+            if valid_docs:
+                self.bm25_retriever = BM25Retriever.from_documents(valid_docs)
+                # --- FIX: Attach to the vectorstore instance so Retriever can see it ---
+                self.vectorstore.bm25_retriever = self.bm25_retriever
+                logger.info(f"BM25Retriever built and attached to vectorstore ({len(valid_docs)} docs).")
+            else:
                 self.bm25_retriever = None
-                return
 
-            self.bm25_retriever = BM25Retriever.from_documents(valid_docs)
-            logger.info(f"Successfully built BM25Retriever with {len(valid_docs)} documents.")
-        
         except Exception as e:
-            logger.error(f"Failed to build BM25Retriever due to an unexpected error: {e}", exc_info=True)
+            logger.error(f"BM25 build error: {e}")
             self.bm25_retriever = None
 
+            
     def create_index(self, texts: List[str], vectors: List[List[float]], metadatas: List[dict]) -> None:
         if not texts or not vectors:
             raise ValueError("Texts and vectors cannot be empty for index creation.")
